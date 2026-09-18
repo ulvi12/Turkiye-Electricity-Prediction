@@ -22,7 +22,7 @@ On the held-out 2025 dataset, the consumption-and-calendar model achieved **2.84
 
 The evaluation uses 2022–2023 for initial training, 2024 for model selection, and 2025 for the final test. The evaluation model is fit through 2024; the production model is subsequently refit through 2025.
 
-These results come from historical simulation with a 48-hour consumption availability assumption. They are separate from the dashboard's recorded EPIAS comparisons. [Full evaluation results](reports/evaluation.json)
+These results come from the held-out 2025 evaluation with a 48-hour consumption availability assumption. [Full evaluation results](reports/evaluation.json)
 
 ## Data and modeling
 
@@ -47,7 +47,7 @@ flowchart LR
 
 The worker runs in Docker through GitHub Actions. It publishes the next day's 24-hour forecast before the project's noon Istanbul cutoff, then reconciles observed consumption independently.
 
-Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. A rolling 365-day integrity check fills missing observations and creates clearly labeled historical simulations for missing forecast dates. Simulations enforce the same 48-hour consumption cutoff and remain separate from genuinely issued forecasts.
+Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. A rolling 365-day integrity check keeps model predictions, actual consumption, and official forecasts complete.
 
 FastAPI serves stored results to Streamlit. The dashboard provides a full-history comparison, daily demand curves, monthly error summaries, and hourly data export. It reads the original monitoring records alongside the newer forecast schema, with separate evaluation views for their different recording methods.
 

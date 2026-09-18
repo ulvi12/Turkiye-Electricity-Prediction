@@ -73,6 +73,13 @@ class Observation(Base):
     retrieved_at = Column(DateTime, nullable=False)
 
 
+class OperatorForecast(Base):
+    __tablename__ = "operator_forecasts_v2"
+    date = Column(DateTime, primary_key=True)
+    forecast = Column(Float, nullable=False)
+    retrieved_at = Column(DateTime, nullable=False)
+
+
 class JobEvent(Base):
     __tablename__ = "job_events_v2"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -179,6 +186,19 @@ class Database:
                 record.retrieved_at = utc_naive(retrieved_at)
         return len(values)
 
+    def save_operator_forecasts(self, frame, retrieved_at):
+        values = hourly_frame(frame, "lep")
+        with self.Session.begin() as session:
+            for ts, row in values.iterrows():
+                stamp = utc_naive(ts)
+                record = session.get(OperatorForecast, stamp)
+                if record is None:
+                    record = OperatorForecast(date=stamp)
+                    session.add(record)
+                record.forecast = float(row.lep)
+                record.retrieved_at = utc_naive(retrieved_at)
+        return len(values)
+
     def missing_actual_dates(self, before, since=None):
         """Return days with missing actuals inside an explicit local-date horizon.
 
@@ -259,6 +279,55 @@ class Database:
                 candidates = {day for day in candidates if len(coverage.get(day, set())) < 24}
         return sorted(candidates)
 
+    def missing_operator_forecast_dates(self, before, since):
+        """Return forecast-bearing days without 24 official hourly forecasts."""
+        before_date = local_timestamp(before).date()
+        since_date = local_timestamp(since).date()
+        if since_date >= before_date:
+            return []
+        relevant, covered = set(), {}
+        with self.Session() as session:
+            relevant.update(
+                session.scalars(
+                    select(ForecastRun.target_date).where(
+                        ForecastRun.target_date >= since_date,
+                        ForecastRun.target_date < before_date,
+                    )
+                ).all()
+            )
+            versioned = session.execute(
+                select(ForecastHour.date, ForecastHour.epias_forecast)
+                .join(ForecastRun, ForecastHour.run_id == ForecastRun.id)
+                .where(ForecastRun.target_date >= since_date, ForecastRun.target_date < before_date)
+            ).all()
+            for stamp, value in versioned:
+                if value is not None:
+                    local = pd.Timestamp(stamp, tz="UTC").tz_convert("Europe/Istanbul")
+                    covered.setdefault(local.date(), set()).add(local.hour)
+
+            if self.has_history():
+                history = session.execute(
+                    select(MonitoringHistory.date, MonitoringHistory.epias_forecast).where(
+                        MonitoringHistory.date >= datetime.combine(since_date, time.min),
+                        MonitoringHistory.date < datetime.combine(before_date, time.min),
+                    )
+                ).all()
+                for stamp, value in history:
+                    relevant.add(stamp.date())
+                    if value is not None:
+                        covered.setdefault(stamp.date(), set()).add(stamp.hour)
+
+            official = session.scalars(
+                select(OperatorForecast.date).where(
+                    OperatorForecast.date >= utc_naive(datetime.combine(since_date, time.min)),
+                    OperatorForecast.date < utc_naive(datetime.combine(before_date, time.min)),
+                )
+            ).all()
+            for stamp in official:
+                local = pd.Timestamp(stamp, tz="UTC").tz_convert("Europe/Istanbul")
+                covered.setdefault(local.date(), set()).add(local.hour)
+        return sorted(day for day in relevant if len(covered.get(day, set())) < 24)
+
     def record_job(self, task, status, detail, at):
         with self.Session.begin() as session:
             session.add(JobEvent(task=task, status=status, detail=detail[:300], finished_at=utc_naive(at)))
@@ -282,11 +351,22 @@ class Database:
                 )
             ).all()
             observed = {row.date: row for row in observations}
+            official = session.scalars(
+                select(OperatorForecast).where(
+                    OperatorForecast.date >= utc_naive(datetime.combine(start, time.min)),
+                    OperatorForecast.date < utc_naive(datetime.combine(end + timedelta(days=1), time.min)),
+                )
+            ).all()
+            operator = {row.date: row for row in official}
             return [
                 {
                     "date": utc_iso(utc_naive(row.date)),
                     "prediction": row.model_prediction,
-                    "epias_forecast": row.epias_forecast,
+                    "epias_forecast": (
+                        operator[utc_naive(row.date)].forecast
+                        if utc_naive(row.date) in operator
+                        else row.epias_forecast
+                    ),
                     "actual": (
                         observed[utc_naive(row.date)].consumption
                         if utc_naive(row.date) in observed
@@ -314,9 +394,10 @@ class Database:
             return history
         with self.Session() as session:
             issued_query = (
-                select(ForecastHour, ForecastRun, Observation)
+                select(ForecastHour, ForecastRun, Observation, OperatorForecast)
                 .join(ForecastRun, ForecastHour.run_id == ForecastRun.id)
                 .outerjoin(Observation, ForecastHour.date == Observation.date)
+                .outerjoin(OperatorForecast, ForecastHour.date == OperatorForecast.date)
                 .where(ForecastRun.target_date >= start, ForecastRun.target_date <= end)
                 .order_by(ForecastHour.date)
             )
@@ -327,7 +408,7 @@ class Database:
                 {
                     "date": utc_iso(hour.date),
                     "prediction": hour.prediction,
-                    "epias_forecast": hour.epias_forecast,
+                    "epias_forecast": official.forecast if official else hour.epias_forecast,
                     "actual": actual.consumption if actual else None,
                     "actual_retrieved_at": utc_iso(actual.retrieved_at) if actual else None,
                     "run_id": run.id,
@@ -336,10 +417,18 @@ class Database:
                     "origin": run.origin,
                     "benchmark_status": run.benchmark_status,
                 }
-                for hour, run, actual in records
+                for hour, run, actual, official in records
             ]
         combined = {row["date"]: row for row in history}
-        combined.update({row["date"]: row for row in issued})
+        for row in issued:
+            previous = combined.get(row["date"])
+            if previous:
+                if row["actual"] is None:
+                    row["actual"] = previous["actual"]
+                    row["actual_retrieved_at"] = previous["actual_retrieved_at"]
+                if row["epias_forecast"] is None:
+                    row["epias_forecast"] = previous["epias_forecast"]
+            combined[row["date"]] = row
         return sorted(combined.values(), key=lambda row: row["date"])
 
     def status(self):

@@ -51,12 +51,26 @@ def test_overlapping_history_remains_accessible(db, populate_history, result):
     assert issued[0]["origin"] == "live"
 
 
-def test_different_protocols_are_not_pooled_into_one_score():
+def test_complete_history_uses_all_matched_hours():
     metrics = evaluate_records(
         [
             {"actual": 10, "prediction": 11, "epias_forecast": 12, "origin": "historical_monitoring"},
             {"actual": 10, "prediction": 14, "epias_forecast": 13, "origin": "live"},
         ]
     )
-    assert metrics["model"] is None
-    assert metrics["by_origin"]["live"]["model"]["mae_mwh"] == 4
+    assert metrics["model"]["mae_mwh"] == pytest.approx(2.5)
+
+
+def test_official_forecast_repairs_overlay_without_rewriting_history(db, populate_history):
+    populate_history(db)
+    stamp = datetime(2026, 3, 1, 8)
+    with db.Session.begin() as session:
+        session.get(MonitoringHistory, stamp).epias_forecast = None
+
+    official = pd.DataFrame({"date": day_hours("2026-03-01"), "lep": 37000})
+    db.save_operator_forecasts(official, local_timestamp("2026-03-02"))
+
+    rows = db.series(date(2026, 3, 1), date(2026, 3, 1))
+    assert rows[8]["epias_forecast"] == 37000
+    with db.Session() as session:
+        assert session.get(MonitoringHistory, stamp).epias_forecast is None

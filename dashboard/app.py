@@ -88,16 +88,6 @@ def plot_consumption(frame, daily=False):
 
 
 def metric_cards(metrics):
-    label = None
-    if "by_origin" in metrics:
-        for origin, description in (
-            ("historical_monitoring", "recorded monitoring"),
-            ("live", "issued forecasts"),
-            ("historical_simulation", "historical simulations"),
-        ):
-            if origin in metrics["by_origin"]:
-                metrics, label = metrics["by_origin"][origin], description
-                break
     # Head-to-head cards use the same rows for BOTH forecasts.
     model = metrics["paired_model"] or metrics["model"]
     epias = metrics["epias"]
@@ -120,8 +110,6 @@ def metric_cards(metrics):
         f"{hours:,} evaluated hours · {metrics['forecast_hours']:,} / "
         f"{metrics['expected_hours']:,} forecast hours available · Lower error is better."
     )
-    if label:
-        st.caption(f"Headline metrics use {label}; forecasting protocols are not pooled.")
     if model and model["mape_hours"] < model["hours"]:
         st.caption("MAPE excludes zero-consumption hours; MAE and RMSE include them.")
 
@@ -153,126 +141,64 @@ if not status["latest_target_date"]:
     st.info("No monitoring records are available in the connected database.")
     st.stop()
 
-has_history = bool(status["history_hours"])
-has_issued = bool(status["latest_issued_date"])
-has_simulated = bool(status.get("latest_simulated_date"))
-source = "recorded" if has_history else "issued"
-
-if has_history and (has_issued or has_simulated):
-    choices = ["Complete history", "Recorded monitoring"]
-    if has_issued:
-        choices.append("Issued forecasts")
-    choice = st.radio("Data series", choices, horizontal=True)
-    source = {"Complete history": "all", "Recorded monitoring": "recorded", "Issued forecasts": "issued"}[
-        choice
-    ]
-
-if source == "all":
-    first = date.fromisoformat(status["first_target_date"])
-    last = date.fromisoformat(status["latest_target_date"])
-elif source == "recorded":
-    first = date.fromisoformat(status["history_first_date"])
-    last = date.fromisoformat(status["history_latest_date"])
-else:
-    first = date.fromisoformat(status["first_issued_date"])
-    last = date.fromisoformat(status["latest_issued_date"])
+source = "all"
+first = date.fromisoformat(status["first_target_date"])
+last = date.fromisoformat(status["latest_target_date"])
 
 info_column, refresh_column = st.columns([6, 1])
 info_column.caption(f"Data available: {first:%d %b %Y} — {last:%d %b %Y} · Istanbul time (UTC+03)")
 if refresh_column.button("Refresh", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
-overview, daily = st.tabs(["Performance history", "Daily comparison"])
-
 try:
-    with overview:
-        dates = st.date_input(
-            "Date range",
-            (max(first, last - timedelta(days=365)), last),
-            min_value=first,
-            max_value=last,
-            key=f"history_range_{source}",
-        )
-        if len(dates) != 2:
-            st.info("Choose an end date to view the selected period.")
-        elif (dates[1] - dates[0]).days > 365:
-            st.info("Select up to 366 days at a time.")
-        else:
-            start, end = dates
-            records = fetch("/forecasts", start=str(start), end=str(end), source=source)["records"]
-            if not records:
-                st.info("No records in the selected date range.")
-            else:
-                metrics = evaluate_records(records, ((end - start).days + 1) * 24)
-                metric_cards(metrics)
-                frame = frame_from(records)
-                st.subheader("Consumption over time")
-                plot_consumption(frame, daily=True)
-                with st.expander("Monthly performance"):
-                    rows = []
-                    for month, subset in frame.groupby(frame.date.dt.strftime("%Y-%m")):
-                        result = evaluate_records(subset.to_dict("records"))
-                        if "by_origin" in result:
-                            result = result["by_origin"].get("historical_monitoring") or result[
-                                "by_origin"
-                            ].get("historical_simulation")
-                        model = result["paired_model"] or result["model"]
-                        epias = result["epias"]
-                        if model:
-                            rows.append(
-                                {
-                                    "Month": month,
-                                    "XGBoost MAE (MWh)": model["mae_mwh"],
-                                    "EPIAS MAE (MWh)": epias["mae_mwh"] if epias else None,
-                                    "XGBoost MAPE (%)": model["mape_pct"],
-                                    "EPIAS MAPE (%)": epias["mape_pct"] if epias else None,
-                                    "Evaluated hours": model["hours"],
-                                }
-                            )
-                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-                with st.expander("Hourly records"):
-                    columns = ["date", "actual", "prediction", "epias_forecast"]
-                    st.dataframe(frame[columns], hide_index=True, use_container_width=True)
-                    st.download_button(
-                        "Download CSV",
-                        frame[columns].to_csv(index=False),
-                        "electricity-demand.csv",
-                        "text/csv",
-                    )
-
-    with daily:
-        selected = st.date_input("Date", last, min_value=first, max_value=last, key=f"daily_date_{source}")
-        records = fetch("/forecasts", start=str(selected), end=str(selected), source=source)["records"]
+    dates = st.date_input(
+        "Date range",
+        (max(first, last - timedelta(days=365)), last),
+        min_value=first,
+        max_value=last,
+        key="history_range",
+    )
+    if len(dates) != 2:
+        st.info("Choose an end date to view the selected period.")
+    elif (dates[1] - dates[0]).days > 365:
+        st.info("Select up to 366 days at a time.")
+    else:
+        start, end = dates
+        records = fetch("/forecasts", start=str(start), end=str(end), source=source)["records"]
         if not records:
-            st.info("No records are available for this date.")
+            st.info("No records in the selected date range.")
         else:
+            metrics = evaluate_records(records, ((end - start).days + 1) * 24)
+            metric_cards(metrics)
             frame = frame_from(records)
-            metric_cards(evaluate_records(records, 24))
-            plot_consumption(frame)
-            if not frame.actual.notna().any():
-                st.caption("Actual consumption will appear when it becomes available.")
-
-    with st.expander("About the results"):
-        if source == "recorded":
-            st.write(
-                "This view preserves the project's recorded monitoring history. Original prediction issuance "
-                "times were not stored, so these comparisons are reported as historical monitoring results."
-            )
-        elif source == "all":
-            st.write(
-                "This view combines recorded monitoring, genuinely issued forecasts, and clearly labeled "
-                "historical simulations used only to fill missing dates. Simulations use a 48-hour data "
-                "availability cutoff and are evaluated separately from other forecasting protocols."
-            )
-        else:
-            st.write(
-                "These predictions were stored before the target day. Each run preserves its issuance time, "
-                "model fingerprint, and input snapshot. Actual consumption is collected separately."
-            )
-        st.write(
-            "MAE and RMSE are measured in MWh. MAPE is a percentage; differences in MAPE are percentage "
-            "points. EPIAS comparisons use identical evaluated hours. Incomplete days are omitted from "
-            "the daily-total chart and remain available in the hourly table."
-        )
+            st.subheader("Consumption over time")
+            plot_consumption(frame, daily=True)
+            with st.expander("Monthly performance"):
+                rows = []
+                for month, subset in frame.groupby(frame.date.dt.strftime("%Y-%m")):
+                    result = evaluate_records(subset.to_dict("records"))
+                    model = result["paired_model"] or result["model"]
+                    epias = result["epias"]
+                    if model:
+                        rows.append(
+                            {
+                                "Month": month,
+                                "XGBoost MAE (MWh)": model["mae_mwh"],
+                                "EPIAS MAE (MWh)": epias["mae_mwh"] if epias else None,
+                                "XGBoost MAPE (%)": model["mape_pct"],
+                                "EPIAS MAPE (%)": epias["mape_pct"] if epias else None,
+                                "Evaluated hours": model["hours"],
+                            }
+                        )
+                st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            with st.expander("Hourly records"):
+                columns = ["date", "actual", "prediction", "epias_forecast"]
+                st.dataframe(frame[columns], hide_index=True, use_container_width=True)
+                st.download_button(
+                    "Download CSV",
+                    frame[columns].to_csv(index=False),
+                    "electricity-demand.csv",
+                    "text/csv",
+                )
 except (requests.RequestException, ValueError, KeyError):
     st.error("The selected data could not be loaded. Please refresh and try again.")

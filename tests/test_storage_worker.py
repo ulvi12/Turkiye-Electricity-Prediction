@@ -187,6 +187,29 @@ def test_complete_recorded_days_are_not_backfilled(db, populate_history):
     ) == []
 
 
+def test_official_forecast_gaps_are_reconciled(db, populate_history):
+    populate_history(db)
+    from src.database import MonitoringHistory
+
+    missing_stamp = pd.Timestamp("2026-05-31 11:00").to_pydatetime()
+    with db.Session.begin() as session:
+        session.get(MonitoringHistory, missing_stamp).epias_forecast = None
+
+    class Loader:
+        def get_load_estimation_plan(self, start, end):
+            return pd.DataFrame({"date": day_hours(start), "lep": 41000})
+
+    repaired = daily_run.reconcile_operator_forecasts(
+        db, Loader(), 1, lambda: local_timestamp("2026-06-01 10:00")
+    )
+    assert repaired == 1
+    assert not db.missing_operator_forecast_dates(
+        local_timestamp("2026-06-01"), local_timestamp("2026-05-31")
+    )
+    rows = db.series(date(2026, 5, 31), date(2026, 5, 31))
+    assert rows[11]["epias_forecast"] == 41000
+
+
 def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):
     completed = []
 

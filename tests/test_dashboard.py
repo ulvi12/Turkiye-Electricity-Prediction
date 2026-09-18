@@ -24,10 +24,12 @@ def test_dashboard_populated_and_interactive(db, monkeypatch, populate_history):
     st.cache_data.clear()
     page = AppTest.from_file("dashboard/app.py").run(timeout=30)
     assert not page.exception
-    assert len(page.metric) >= 6
+    assert len(page.metric) == 3
+    assert not page.tabs
+    assert not page.radio
     assert not page.error
     assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
-    page.date_input[1].set_value(date(2026, 3, 26)).run()
+    page.date_input[0].set_value((date(2026, 3, 1), date(2026, 3, 26))).run()
     assert not page.exception
     st.cache_data.clear()
 
@@ -53,7 +55,7 @@ def test_dashboard_handles_empty_database(db, monkeypatch):
     st.cache_data.clear()
 
 
-def test_switching_to_new_forecasts_keeps_history_available(db, monkeypatch, populate_history, result):
+def test_complete_history_includes_new_forecasts(db, monkeypatch, populate_history, result):
     populate_history(db)
     result.target_date = "2026-06-01"
     result.predictions = pd.DataFrame({"date": day_hours(result.target_date), "prediction": 40000})
@@ -71,10 +73,7 @@ def test_switching_to_new_forecasts_keeps_history_available(db, monkeypatch, pop
     monkeypatch.setattr(ForecastClient, "get", get)
     st.cache_data.clear()
     page = AppTest.from_file("dashboard/app.py").run(timeout=30)
-    page.radio[0].set_value("Issued forecasts").run()
     assert not page.exception
-    assert page.date_input[1].value == date(2026, 6, 1)
-    page.radio[0].set_value("Recorded monitoring").run()
-    assert not page.exception
-    assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
+    assert not page.radio and not page.tabs
+    assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 6, 1))
     st.cache_data.clear()

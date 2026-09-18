@@ -82,6 +82,8 @@ def backfill_forecast_gaps(db, loader, lookback_days=365, clock=now_local, pipel
     history = loader.get_realtime_consumption(first - pd.Timedelta(days=10), last - pd.Timedelta(days=2))
     try:
         benchmarks = loader.get_load_estimation_plan(first, last)
+        if not benchmarks.empty:
+            db.save_operator_forecasts(benchmarks, clock())
     except Exception:
         logger.warning("Historical operator forecasts unavailable; simulations will omit the benchmark")
         benchmarks = pd.DataFrame(columns=["date", "lep"])
@@ -115,6 +117,25 @@ def backfill_forecast_gaps(db, loader, lookback_days=365, clock=now_local, pipel
     return completed
 
 
+def reconcile_operator_forecasts(db, loader, lookback_days=365, clock=now_local):
+    today = local_timestamp(clock()).normalize()
+    since = today - pd.Timedelta(days=lookback_days)
+    targets = db.missing_operator_forecast_dates(today, since)
+    if not targets:
+        return 0
+    forecasts = loader.get_load_estimation_plan(targets[0], targets[-1])
+    if forecasts.empty:
+        raise RuntimeError("Official historical forecasts are unavailable")
+    db.save_operator_forecasts(forecasts, clock())
+    remaining = db.missing_operator_forecast_dates(today, since)
+    if remaining:
+        raise RuntimeError(
+            f"Official forecasts incomplete for {len(remaining)} day(s): "
+            f"{', '.join(str(day) for day in remaining[:10])}"
+        )
+    return len(targets)
+
+
 def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
     db, loader = db or Database(), loader or DataLoader()
     db.initialize()
@@ -123,9 +144,15 @@ def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
     if mode in ("all", "forecast"):
         tasks.append(("forecast", lambda: issue_forecast(db, loader, clock)))
     if mode in ("all", "actuals"):
-        tasks.append(("actuals", lambda: reconcile_actuals(db, loader, lookback_days, clock)))
         tasks.append(
             ("forecast_backfill", lambda: backfill_forecast_gaps(db, loader, lookback_days, clock))
+        )
+        tasks.append(("actuals", lambda: reconcile_actuals(db, loader, lookback_days, clock)))
+        tasks.append(
+            (
+                "operator_forecasts",
+                lambda: reconcile_operator_forecasts(db, loader, lookback_days, clock),
+            )
         )
     for name, task in tasks:
         try:

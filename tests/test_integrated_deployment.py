@@ -33,7 +33,8 @@ def test_integrated_dashboard_needs_only_existing_database_setting(tmp_path, mon
         page = AppTest.from_file("dashboard/app.py").run(timeout=30)
         assert not page.exception
         assert not page.error
-        assert len(page.metric) >= 6
+        assert len(page.metric) == 3
+        assert not page.tabs and not page.radio
         first_service = local_api(url)
         assert ForecastClient(database_url=url).get("/health")["status"] == "ok"
         assert local_api(url) is first_service

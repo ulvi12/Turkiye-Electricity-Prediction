@@ -35,16 +35,6 @@ def evaluate_records(records, expected_hours=None):
     if not records:
         return empty
     frame = pd.DataFrame(records)
-    origins = {r.get("origin", "unspecified") for r in records}
-    if len(origins) > 1:
-        return {
-            **empty,
-            "by_origin": {
-                origin: evaluate_records([r for r in records if r.get("origin", "unspecified") == origin])
-                for origin in sorted(origins)
-            },
-            "note": "Different forecasting protocols are evaluated separately.",
-        }
     empty["forecast_hours"] = int(frame.prediction.notna().sum())
     observed = frame.dropna(subset=["actual", "prediction"])
     paired = observed.dropna(subset=["epias_forecast"])
