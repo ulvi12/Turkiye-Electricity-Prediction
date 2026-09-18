@@ -1,39 +1,45 @@
-name: Daily Prediction Update
+name: Day-ahead forecast and actuals
 
 on:
   schedule:
-    # Runs daily at 10:12 UTC (13:12 Istanbul time)
-    - cron: '12 10 * * *'
+    # 09:15, 10:15, 11:15 Istanbul: retry before the 12:00 project cutoff.
+    - cron: '15 6-8 * * *'
+    # Separate actuals recovery, including retries after provider delays.
+    - cron: '15 12,18 * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Worker operation
+        type: choice
+        options: [all, forecast, actuals]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forecast-worker
+  cancel-in-progress: false
 
 jobs:
-  daily-update:
+  update:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
     steps:
-      - name: Show public IP
-        run: curl https://api.ipify.org
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      
-      - name: Run daily prediction pipeline
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 4
-          max_attempts: 5
-          retry_wait_seconds: 3600
-          command: python scripts/daily_run.py
+      - uses: actions/checkout@v4
+      - name: Build reproducible worker
+        run: docker build -t grid-forecast .
+      - name: Run worker
         env:
           EPIAS_USERNAME: ${{ secrets.EPIAS_USERNAME }}
           EPIAS_PASSWORD: ${{ secrets.EPIAS_PASSWORD }}
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          REQUESTED_MODE: ${{ inputs.mode }}
+          SCHEDULE: ${{ github.event.schedule }}
+        shell: bash
+        run: |
+          test -n "$DATABASE_URL" || { echo "Missing persistent database secret"; exit 1; }
+          mode="${REQUESTED_MODE:-all}"
+          if [ "$SCHEDULE" = "15 12,18 * * *" ]; then mode=actuals; fi
+          docker run --rm -e EPIAS_USERNAME -e EPIAS_PASSWORD -e DATABASE_URL \
+            grid-forecast python scripts/daily_run.py --mode "$mode"

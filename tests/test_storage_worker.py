@@ -1,0 +1,123 @@
+from datetime import date
+import json
+import pandas as pd
+import pytest
+from scripts import daily_run
+from src.time_utils import day_hours, local_timestamp
+
+ISSUE = local_timestamp("2025-12-31 10:00")
+
+
+def test_forecast_retry_is_immutable(db, result):
+    first = db.save_forecast(result, ISSUE)
+    result.predictions["prediction"] += 999
+    second = db.save_forecast(result, ISSUE + pd.Timedelta(minutes=30))
+    assert first.id == second.id
+    rows = db.series(date(2026, 1, 1), date(2026, 1, 1))
+    assert len(rows) == 24
+    assert rows[0]["prediction"] == 35000
+    assert rows[0]["date"] == "2025-12-31T21:00:00+00:00"
+    assert rows[0]["issued_at"] == "2025-12-31T07:00:00+00:00"
+
+
+@pytest.mark.parametrize("issue", ["2025-12-31 12:00", "2026-01-01 01:00", "2025-12-30 10:00"])
+def test_late_or_backdated_forecasts_rejected(db, result, issue):
+    with pytest.raises(ValueError, match="previous day"):
+        db.save_forecast(result, local_timestamp(issue))
+    assert db.get_run(result.target_date) is None
+
+
+def test_partial_forecast_transaction_rejected(db, result):
+    result.predictions = result.predictions.iloc[:23]
+    with pytest.raises(ValueError, match="24 hours"):
+        db.save_forecast(result, ISSUE)
+    assert db.get_run(result.target_date) is None
+
+
+def test_actuals_update_does_not_change_forecast(db, result):
+    saved = db.save_forecast(result, ISSUE)
+    actual = pd.DataFrame({"date": day_hours(result.target_date), "consumption": 40000})
+    db.save_actuals(actual, local_timestamp("2026-01-02"))
+    actual["consumption"] = 41000
+    db.save_actuals(actual, local_timestamp("2026-01-03"))
+    assert db.get_run(result.target_date).input_sha256 == saved.input_sha256
+    rows = db.series(date(2026, 1, 1), date(2026, 1, 1))
+    assert rows[0]["actual"] == 41000 and rows[0]["prediction"] == 35000
+    assert not db.missing_actual_dates(local_timestamp("2026-01-02"))
+
+
+def test_snapshot_includes_benchmark_and_checksum(db, result):
+    benchmark = pd.DataFrame({"date": day_hours(result.target_date), "lep": 36000})
+    saved = db.save_forecast(result, ISSUE, benchmark, "complete")
+    assert len(json.loads(saved.input_snapshot)["benchmark"]) == 24
+    assert len(saved.input_sha256) == 64
+
+
+def test_retry_skips_inference(db, result):
+    db.save_forecast(result, ISSUE)
+
+    def fail(**kwargs):
+        raise AssertionError("Retry must not rerun inference")
+
+    run = daily_run.issue_forecast(db, object(), lambda: ISSUE, fail)
+    assert run.target_date == date(2026, 1, 1)
+
+
+def test_completion_cutoff_checked_after_inference(db, result):
+    class Pipeline:
+        def __init__(self, **kwargs):
+            pass
+
+        def predict(self, target):
+            return result
+
+    class Loader:
+        def get_load_estimation_plan(self, *args):
+            return pd.DataFrame()
+
+    times = iter([ISSUE, local_timestamp("2025-12-31 12:01")])
+    with pytest.raises(ValueError, match="previous day"):
+        daily_run.issue_forecast(db, Loader(), lambda: next(times), Pipeline)
+
+
+def test_benchmark_failure_does_not_prevent_forecast(db, result):
+    class Pipeline:
+        def __init__(self, **kwargs):
+            pass
+
+        def predict(self, target):
+            return result
+
+    class Loader:
+        def get_load_estimation_plan(self, *args):
+            raise RuntimeError("Provider unavailable")
+
+    saved = daily_run.issue_forecast(db, Loader(), lambda: ISSUE, Pipeline)
+    assert saved.benchmark_status == "unavailable"
+
+
+def test_actuals_recovery_includes_old_unresolved_dates(db, result):
+    db.save_forecast(result, ISSUE)
+    requested = []
+
+    class Loader:
+        def get_realtime_consumption(self, start, end):
+            requested.append(start)
+            return pd.DataFrame({"date": day_hours(start), "consumption": 40000})
+
+    daily_run.reconcile_actuals(db, Loader(), 1, lambda: local_timestamp("2026-02-01 10:00"))
+    assert date(2026, 1, 1) in requested and date(2026, 1, 31) in requested
+
+
+def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):
+    completed = []
+
+    def fail(*args):
+        raise RuntimeError("Forecast failure")
+
+    monkeypatch.setattr(daily_run, "issue_forecast", fail)
+    monkeypatch.setattr(daily_run, "reconcile_actuals", lambda *args: completed.append(True))
+    with pytest.raises(RuntimeError, match="forecast"):
+        daily_run.run(db=db, loader=object(), clock=lambda: ISSUE)
+    assert completed == [True]
+    assert {event["status"] for event in db.status()["jobs"]} == {"success", "failed"}

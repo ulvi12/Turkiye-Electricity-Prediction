@@ -1,116 +1,108 @@
+"""Issue tomorrow's forecast, then reconcile actuals without rewriting forecasts."""
+
+import argparse
 import logging
+from pathlib import Path
 import sys
-import os
 import pandas as pd
-from datetime import datetime, timedelta
-from sklearn.metrics import mean_absolute_error
 
-# Add parent directory to path for imports
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from src.inference import InferencePipeline
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.config import FORECAST_CUTOFF_HOUR
 from src.data_loader import DataLoader
 from src.database import Database
+from src.inference import InferencePipeline
+from src.time_utils import day_hours, local_timestamp, now_local
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
+def issue_forecast(db, loader, clock=now_local, pipeline_factory=InferencePipeline):
+    now = local_timestamp(clock())
+    target = (now.normalize() + pd.Timedelta(days=1)).date()
+    existing = db.get_run(target)
+    if existing:
+        if existing.origin != "live":
+            raise ValueError("Refusing to use a historical simulation as a live forecast")
+        logger.info("Forecast for %s already exists; preserving run %s", target, existing.id)
+        return existing
+    if now.hour >= FORECAST_CUTOFF_HOUR:
+        raise ValueError("Missed 12:00 Istanbul issuance cutoff; past forecasts are never backdated")
+    pipeline = pipeline_factory(loader=loader)
+    result = pipeline.predict(target)
+    benchmark, benchmark_status = None, "unavailable"
+    try:
+        benchmark = loader.get_load_estimation_plan(target, target)
+        benchmark_status = "complete" if len(benchmark) == 24 else "partial_or_unavailable"
+    except Exception:
+        logger.warning(
+            "EPIAS comparison unavailable; publishing model forecast with explicit missing coverage"
+        )
+    # Check actual completion time, not job-start time, at the storage boundary.
+    return db.save_forecast(result, clock(), benchmark, benchmark_status)
+
+
+def reconcile_actuals(db, loader, lookback_days=14, clock=now_local):
+    today = local_timestamp(clock()).normalize()
+    dates = set(
+        pd.date_range(today - pd.Timedelta(days=lookback_days), today - pd.Timedelta(days=1), freq="D").date
+    )
+    dates.update(db.missing_actual_dates(today))
+    failures = []
+    for target in sorted(dates):
+        try:
+            actuals = loader.get_realtime_consumption(target, target)
+            if actuals.empty:
+                failures.append(str(target))
+                continue
+            db.save_actuals(actuals, clock())
+            received = pd.DatetimeIndex(actuals.date)
+            if len(received.intersection(day_hours(target))) != 24:
+                failures.append(str(target))
+        except Exception:
+            logger.warning("Actuals unavailable for %s; will retry on the next run", target)
+            failures.append(str(target))
+    if failures:
+        raise RuntimeError(f"Actuals incomplete for {len(failures)} day(s): {', '.join(failures[:10])}")
+
+
+def run(mode="all", lookback_days=14, db=None, loader=None, clock=now_local):
+    db, loader = db or Database(), loader or DataLoader()
+    db.initialize()
+    failures = []
+    tasks = []
+    if mode in ("all", "forecast"):
+        tasks.append(("forecast", lambda: issue_forecast(db, loader, clock)))
+    if mode in ("all", "actuals"):
+        tasks.append(("actuals", lambda: reconcile_actuals(db, loader, lookback_days, clock)))
+    for name, task in tasks:
+        try:
+            task()
+            db.record_job(name, "success", "Completed", clock())
+        except Exception as exc:
+            # Store a safe classification; secrets/provider response bodies stay out of DB/logs.
+            detail = f"{type(exc).__name__}: {name} failed; inspect input coverage, credentials, and cutoff"
+            logger.error(detail)
+            db.record_job(name, "failed", detail, clock())
+            failures.append(name)
+    if failures:
+        raise RuntimeError("Worker failed: " + ", ".join(failures))
+
+
 def main():
-    logger.info("Starting daily run...")
-    
-    # 1. Setup
-    db = Database()
-    loader = DataLoader()
-    pipeline = InferencePipeline()
-
-    if pipeline.model is None:
-        logger.error("No model loaded. Exiting.")
-        return
-
-    # 2. Target Date = Yesterday
-    target_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-    logger.info(f"Processing data for: {target_date.date()}")
-    
-    target_start = target_date
-    target_end = target_date + timedelta(hours=23, minutes=59)
-
-    # 3. Fetch Data
-    logger.info("Fetching actual consumption...")
-    actual_df = loader.get_realtime_consumption(target_start, target_end)
-    
-    logger.info("Fetching EPIAS forecast...")
-    epias_df = loader.get_load_estimation_plan(target_start, target_end)
-    
-    logger.info("Generating model predictions...")
-    pred_df = pipeline.predict(target_date)
-
-    if actual_df.empty:
-        logger.warning("No actual consumption data found.")
-        return
-
-    # 4. Standardize & Merge
-    actual_df = actual_df[['date', 'consumption']].rename(columns={'consumption': 'actual_consumption'})
-    
-    if not epias_df.empty:
-        # Find the forecast value column
-        if 'lep' in epias_df.columns:
-            epias_df = epias_df[['date', 'lep']].rename(columns={'lep': 'epias_forecast'})
-        else:
-            cols = [c for c in epias_df.columns if c not in ['date', 'time']]
-            if cols:
-                epias_df = epias_df[['date', cols[0]]].rename(columns={cols[0]: 'epias_forecast'})
-            else:
-                epias_df = pd.DataFrame(columns=['date', 'epias_forecast'])
-    else:
-        epias_df = pd.DataFrame(columns=['date', 'epias_forecast'])
-
-    if not epias_df.empty:
-        epias_df['date'] = pd.to_datetime(epias_df['date'])
-        epias_df = epias_df[epias_df['date'].dt.date == target_date.date()]
-
-    pred_df = pred_df.rename(columns={'prediction': 'model_prediction'})
-
-    actual_df['date'] = pd.to_datetime(actual_df['date'].astype(str).str[:19])
-    if not epias_df.empty:
-        epias_df['date'] = pd.to_datetime(epias_df['date'].astype(str).str[:19])
-    pred_df['date'] = pd.to_datetime(pred_df['date'].astype(str).str[:19])
-
-    merged_df = pd.merge(actual_df, epias_df, on='date', how='outer')
-    merged_df = pd.merge(merged_df, pred_df, on='date', how='outer')
-
-    # 5. Store in DB
-    logger.info("Saving to database...")
-    count = 0
-    for _, row in merged_df.iterrows():
-        ts = row['date']
-        if isinstance(ts, pd.Timestamp):
-            ts = ts.to_pydatetime()
-            
-        act = row['actual_consumption'] if pd.notnull(row.get('actual_consumption')) else None
-        epi = row['epias_forecast'] if pd.notnull(row.get('epias_forecast')) else None
-        mod = row['model_prediction'] if pd.notnull(row.get('model_prediction')) else None
-        
-        db.upsert_monitoring_data(ts, act, epi, mod)
-        count += 1
-    logger.info(f"Saved {count} records.")
-
-    # 6. Performance Check
-    valid_data = merged_df.dropna()
-    
-    if not valid_data.empty:
-        mae_model = mean_absolute_error(valid_data['actual_consumption'], valid_data['model_prediction'])
-        mae_epias = mean_absolute_error(valid_data['actual_consumption'], valid_data['epias_forecast'])
-        
-        logger.info(f"Model MAE: {mae_model:.2f} | EPIAS MAE: {mae_epias:.2f}")
-        
-        if mae_model > 2 * mae_epias and mae_epias > 0:
-            logger.warning(f"Model performance alert! Model MAE ({mae_model:.2f}) is > 2x worse than EPIAS ({mae_epias:.2f})")
-    else:
-        logger.warning("Insufficient data for MAE comparison.")
-
-    logger.info("Daily run completed.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=["all", "forecast", "actuals"], default="all")
+    parser.add_argument("--lookback-days", type=int, default=14)
+    args = parser.parse_args()
+    if not 1 <= args.lookback_days <= 366:
+        parser.error("--lookback-days must be between 1 and 366")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        run(args.mode, args.lookback_days)
+    except Exception as exc:
+        logger.error("%s", exc)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

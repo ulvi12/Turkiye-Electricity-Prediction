@@ -1,69 +1,66 @@
-# Türkiye's Electricity Consumption Forecasting
+# Türkiye Electricity Demand Forecasting
 
-An end-to-end ML pipeline that forecasts Turkey's hourly electricity consumption one day ahead, updated automatically every day.
+An end-to-end machine learning project for forecasting Türkiye's hourly electricity consumption and comparing predictions with EPIAS, the national energy market operator.
 
-**[Live Dashboard](https://turkeyelectricityprediction.streamlit.app/)**
+[**Live dashboard**](https://turkeyelectricityprediction.streamlit.app/)
 
----
+## The problem
 
-## What it does
+Electricity demand changes with daily routines, weekends, holidays, and seasonal patterns. A useful forecast needs to capture those patterns while using only information available before the target day.
 
-Turkey's energy market [EPIAS](https://www.epias.com.tr/en/) publishes hourly electricity consumption data for Türkiye. They also publish their official forecasts for the hourly consumption. This project builds an XGBoost model that competes with that official forecast, using the same publicly available inputs: historical consumption and weather data.
+This project combines time-series feature engineering, XGBoost, scheduled data ingestion, persistent monitoring, and an interactive dashboard. It connects model evaluation with the practical work of collecting data, publishing forecasts, and measuring error over time.
 
-> The day-ahead market requires participants to submit their consumption/generation plans by 12:00 the previous day. To create the same realistic setting, our forecasts are made one full day prior to the actual realizations. See [EPIAS Day-Ahead Market](https://www.epias.com.tr/en/day-ahead-market/processes/) for details.
+## Results
 
-Each day, a GitHub Actions job:
-1. Fetches actual consumption from EPIAS API
-2. Fetches the official EPIAS forecast
-3. Runs the XGBoost model
-4. Writes all three to Supabase
-5. The Streamlit dashboard shows the comparison in real time
+On the held-out 2025 dataset, the consumption-and-calendar model achieved **2.84% MAPE** and reduced MAE by **43.7% against the same-hour-last-week baseline**, across **8,760 hourly observations**.
 
----
+| Model | MAE (MWh) | RMSE (MWh) | MAPE |
+|---|---:|---:|---:|
+| XGBoost | 1,137.12 | 1,607.69 | 2.84% |
+| Same hour, previous week | 2,018.93 | 3,166.77 | 5.25% |
+| Same hour, 48 hours earlier | 3,180.36 | 4,449.93 | 8.17% |
+
+The evaluation uses 2022–2023 for initial training, 2024 for model selection, and 2025 for the final test. The evaluation model is fit through 2024; the production model is subsequently refit through 2025.
+
+These results come from historical simulation with a 48-hour consumption availability assumption. They are separate from the dashboard's recorded EPIAS comparisons. [Full evaluation results](reports/evaluation.json)
+
+## Data and modeling
+
+- **Source:** hourly consumption from EPIAS, with its official load estimates used as a comparison series.
+- **Features:** hour, weekday, season, year, public holidays, consumption lags at 48/72/168 hours, and daily/weekly rolling statistics.
+- **Model:** XGBoost regression with early stopping, chronological validation, and fixed random seeds.
+- **Data integrity:** an explicit hourly index prevents missing records from shifting lag meaning. Incomplete inputs are rejected before publication.
+
+Training and inference use the same feature implementation. Historical weather is excluded from the current model because its availability at the forecast cutoff could not be verified.
+
+## System design
+
+```mermaid
+flowchart LR
+    E[EPIAS] --> W[Scheduled forecast worker]
+    W --> D[(Supabase / PostgreSQL)]
+    D --> A[FastAPI]
+    A --> U[Streamlit dashboard]
+    T[Training and evaluation] --> M[Versioned model]
+    M --> W
+```
+
+The worker runs in Docker through GitHub Actions. It publishes the next day's 24-hour forecast before the project's noon Istanbul cutoff, then reconciles observed consumption independently.
+
+Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. Failed or delayed observation collection is retried without overwriting predictions.
+
+FastAPI serves stored results to Streamlit. The dashboard provides a full-history comparison, daily demand curves, monthly error summaries, and hourly data export. It reads the original monitoring records alongside the newer forecast schema, with separate evaluation views for their different recording methods.
+
+## Evaluation and reliability
+
+- Model and EPIAS errors are compared on identical hours, with coverage shown explicitly.
+- MAE and RMSE use MWh; MAPE is a percentage.
+- Historical monitoring remains available even when no newly issued forecast exists.
+- The release gate requires the candidate model to outperform both naive baselines on holdout MAE.
+- Regression tests cover history compatibility, time alignment, missing data, forecast cutoffs, immutable retries, API behavior, and dashboard rendering.
+
+Original monitoring records do not contain issuance timestamps. Their comparisons are retained as recorded results, rather than treated as evidence of advance publication. Forecast collection also depends on provider availability and best-effort scheduling.
 
 ## Stack
 
-| Layer | Tech |
-|-------|------|
-| ML | XGBoost, Scikit-learn, Pandas |
-| Data Sources | EPIAS (consumption + forecast), Open-Meteo (weather) |
-| Database | Supabase (PostgreSQL) via SQLAlchemy |
-| Dashboard | Streamlit + Plotly |
-| API | FastAPI + Docker |
-| Automation | GitHub Actions (daily cron) |
-
----
-
-## Local setup - Windows
-
-```bash
-git clone https://github.com/ulvi12/Turkey_Electricity_Prediction.git
-cd Turkey_Electricity_Prediction
-python -m venv .venv && .venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env   # fill in EPIAS credentials + Supabase URL
-
-streamlit run dashboard/app.py
-```
-
-**FastAPI (Docker):**
-```bash
-docker-compose up --build
-# http://localhost:8000/docs
-```
-
-**Get predictions for a specific date:**
-```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{"date": "2026-02-15"}'
-```
-
-> Omit the `date` field to predict for yesterday. Dates in the future, starting from today, are rejected because of unavailable data.
-
----
-
-## Deployment
-
-- **Dashboard:** Streamlit Cloud — set `SUPABASE_DB_URL` as a secret
-- **Daily job:** GitHub Actions — set `EPIAS_USERNAME`, `EPIAS_PASSWORD`, `SUPABASE_DB_URL` as repo secrets
+**Python · Pandas · XGBoost · FastAPI · SQLAlchemy · PostgreSQL/Supabase · Streamlit · Plotly · Docker · GitHub Actions**

@@ -1,65 +1,115 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from datetime import datetime, timedelta, date
-import pandas as pd
+"""Read-only serving API. External data collection belongs to the scheduled worker."""
+
 from contextlib import asynccontextmanager
+from datetime import date as Date, timedelta
+import logging
+from typing import Literal
 
-from src.inference import InferencePipeline
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 
-pipeline = None
+from src.database import Database
+from src.metrics import evaluate_records
+from src.time_utils import now_local, utc_iso
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global pipeline
-    try:
-        pipeline = InferencePipeline()
-    except Exception as e:
-        print(f"Failed to initialize inference pipeline: {e}")
-    yield
-
-
-app = FastAPI(title="EPIAS Energy Forecast API", lifespan=lifespan)
+logger = logging.getLogger(__name__)
 
 
 class PredictionRequest(BaseModel):
-    date: str = Field(default=None, description="YYYY-MM-DD format", examples=["2026-02-15"])
+    model_config = ConfigDict(extra="forbid")
+    date: Date | None = None
 
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "model_loaded": pipeline.model is not None if pipeline else False}
+def create_app(database=None):
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.db = database or Database()
+        # Additive v2 tables only. No reads/writes to legacy monitoring records.
+        app.state.db.initialize()
+        yield
+        if database is None:
+            app.state.db.engine.dispose()
 
+    application = FastAPI(title="Türkiye Grid Forecast API", version="2.0.0", lifespan=lifespan)
 
-@app.post("/predict")
-def predict(request: PredictionRequest):
-    if pipeline is None or pipeline.model is None:
-        raise HTTPException(status_code=503, detail="Model not initialized.")
-    
-    try:
-        if request.date:
-            target_date = pd.to_datetime(request.date)
-        else:
-            target_date = datetime.now() + timedelta(days=-1)
+    @application.exception_handler(SQLAlchemyError)
+    async def database_error(request: Request, exc: SQLAlchemyError):
+        logger.error("Database operation failed: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503, content={"detail": "Forecast storage is temporarily unavailable"}
+        )
 
-        limit_date = date.today() + timedelta(days=-1)
-        if target_date.date() > limit_date:
-            raise HTTPException(
-                status_code=422,
-                detail=(f"Cannot predict beyond {limit_date}.")
-            )
+    @application.get("/health")
+    def health(request: Request):
+        request.app.state.db.healthy()
+        return {"status": "ok", "service": "forecast-api", "version": "2.0.0"}
 
-        results = pipeline.predict(target_date)
-        
+    @application.get("/status")
+    def status(request: Request):
+        result = request.app.state.db.status()
+        tomorrow = now_local().date() + timedelta(days=1)
+        result["expected_target_date"] = tomorrow.isoformat()
+        result["tomorrow_ready"] = (
+            result["latest_issued_date"] == tomorrow.isoformat() and result["origin"] == "live"
+        )
+        return result
+
+    def date_range(start, end):
+        if end < start:
+            raise HTTPException(422, "end must be on or after start")
+        if (end - start).days > 365:
+            raise HTTPException(422, "Choose at most 366 days per request")
+
+    @application.get("/forecasts")
+    def forecasts(
+        request: Request,
+        start: Date = Query(...),
+        end: Date = Query(...),
+        source: Literal["all", "recorded", "issued"] = "all",
+    ):
+        date_range(start, end)
         return {
-            "target_date": str(target_date.date()),
-            "predictions": results.to_dict(orient="records")
+            "timezone": "Europe/Istanbul",
+            "unit": "MWh",
+            "records": request.app.state.db.series(start, end, source),
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    @application.get("/metrics")
+    def metrics(
+        request: Request,
+        start: Date = Query(...),
+        end: Date = Query(...),
+        source: Literal["all", "recorded", "issued"] = "all",
+    ):
+        date_range(start, end)
+        return evaluate_records(
+            request.app.state.db.series(start, end, source), ((end - start).days + 1) * 24
+        )
+
+    @application.get("/forecasts/{target_date}")
+    def forecast(target_date: Date, request: Request):
+        run = request.app.state.db.get_run(target_date)
+        if run is None:
+            raise HTTPException(404, "No stored forecast for this date; forecasts are issued by the worker")
+        return {
+            "run_id": run.id,
+            "target_date": str(run.target_date),
+            "issued_at": utc_iso(run.issued_at),
+            "model_version": run.model_version,
+            "input_sha256": run.input_sha256,
+            "origin": run.origin,
+            "benchmark_status": run.benchmark_status,
+            "predictions": request.app.state.db.series(target_date, target_date, "issued"),
+        }
+
+    @application.post("/predict", deprecated=True)
+    def predict(body: PredictionRequest, request: Request):
+        # Compatibility route: typed validation, no external calls or expensive inference.
+        return forecast(body.date or (now_local().date() + timedelta(days=1)), request)
+
+    return application
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+app = create_app()

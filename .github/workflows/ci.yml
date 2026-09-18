@@ -1,0 +1,31 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest -q
+      - name: Build and smoke-test container
+        run: |
+          docker build -t grid-forecast .
+          docker run -d --name grid-api -p 8000:8000 grid-forecast
+          trap 'docker logs grid-api; docker rm -f grid-api' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          exit 1

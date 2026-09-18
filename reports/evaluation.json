@@ -1,0 +1,347 @@
+{
+  "protocol": "2022-23 fit; 2024 tree-count selection; refit through 2024; held-out 2025",
+  "feature_version": "consumption-calendar-v2",
+  "features": [
+    "hour",
+    "dayofweek",
+    "dayofyear",
+    "month",
+    "quarter",
+    "year",
+    "is_holiday",
+    "lag_48",
+    "lag_72",
+    "lag_168",
+    "roll_mean_1d",
+    "roll_std_1d",
+    "roll_mean_1w",
+    "roll_std_1w"
+  ],
+  "data_sha256": "d1c6dad8c4c4289665741f3bcabeaefa4f0edc7a30b9db9470df2dd99d746310",
+  "rows": 35064,
+  "usable_rows": 34849,
+  "warmup_hours": 215,
+  "missing_after_warmup": 0,
+  "selected_trees": 282,
+  "parameters": {
+    "learning_rate": 0.03,
+    "max_depth": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "objective": "reg:squarederror",
+    "random_state": 42,
+    "n_jobs": 2,
+    "tree_method": "hist"
+  },
+  "test_year": 2025,
+  "test": {
+    "model": {
+      "mae_mwh": 1137.1201145744149,
+      "rmse_mwh": 1607.6913828010674,
+      "mape_pct": 2.842139320657532,
+      "hours": 8760,
+      "mape_hours": 8760
+    },
+    "lag_48": {
+      "mae_mwh": 3180.356517123288,
+      "rmse_mwh": 4449.93300947712,
+      "mape_pct": 8.170501106063153,
+      "hours": 8760,
+      "mape_hours": 8760
+    },
+    "lag_168": {
+      "mae_mwh": 2018.9267237442923,
+      "rmse_mwh": 3166.765587546758,
+      "mape_pct": 5.245910077235207,
+      "hours": 8760,
+      "mape_hours": 8760
+    }
+  },
+  "monthly": {
+    "2025-01": {
+      "prediction": {
+        "mae_mwh": 918.6358304981518,
+        "rmse_mwh": 1276.0390551806047,
+        "mape_pct": 2.29844097337509,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 3122.2922983870963,
+        "rmse_mwh": 4597.325338813877,
+        "mape_pct": 7.940476847380887,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 1376.9862768817204,
+        "rmse_mwh": 2572.4349956614315,
+        "mape_pct": 3.4834178439050545,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-02": {
+      "prediction": {
+        "mae_mwh": 1314.0516256277901,
+        "rmse_mwh": 1700.9751543876032,
+        "mape_pct": 3.0491684414293942,
+        "hours": 672,
+        "mape_hours": 672
+      },
+      "lag_48": {
+        "mae_mwh": 3529.9645386904763,
+        "rmse_mwh": 4898.12398499271,
+        "mape_pct": 8.664376634135005,
+        "hours": 672,
+        "mape_hours": 672
+      },
+      "lag_168": {
+        "mae_mwh": 1545.663467261905,
+        "rmse_mwh": 1948.3796917222332,
+        "mape_pct": 3.6400116124283017,
+        "hours": 672,
+        "mape_hours": 672
+      }
+    },
+    "2025-03": {
+      "prediction": {
+        "mae_mwh": 1532.9407724294356,
+        "rmse_mwh": 2106.390045721012,
+        "mape_pct": 4.324197690649497,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 3693.545793010753,
+        "rmse_mwh": 4971.202060145489,
+        "mape_pct": 10.644555875547265,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 3226.7511827956987,
+        "rmse_mwh": 4371.456860020916,
+        "mape_pct": 9.391697426155803,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-04": {
+      "prediction": {
+        "mae_mwh": 1237.5634538845486,
+        "rmse_mwh": 1594.8038573774938,
+        "mape_pct": 3.359615425222895,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_48": {
+        "mae_mwh": 3338.4530555555557,
+        "rmse_mwh": 4523.192402404615,
+        "mape_pct": 9.12651664650407,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_168": {
+        "mae_mwh": 3470.4216527777776,
+        "rmse_mwh": 5012.3514889871885,
+        "mape_pct": 9.678151266087875,
+        "hours": 720,
+        "mape_hours": 720
+      }
+    },
+    "2025-05": {
+      "prediction": {
+        "mae_mwh": 830.7621416120633,
+        "rmse_mwh": 1078.1690516604936,
+        "mape_pct": 2.233091068675534,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 2622.2750403225805,
+        "rmse_mwh": 3604.0545207935306,
+        "mape_pct": 7.098789248682766,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 1448.2145698924733,
+        "rmse_mwh": 2023.2102477604108,
+        "mape_pct": 3.8419367989357385,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-06": {
+      "prediction": {
+        "mae_mwh": 1731.61734516059,
+        "rmse_mwh": 2477.411109203823,
+        "mape_pct": 4.929836775296229,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_48": {
+        "mae_mwh": 4054.994125,
+        "rmse_mwh": 5344.956681130704,
+        "mape_pct": 11.086590842709183,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_168": {
+        "mae_mwh": 4635.278347222223,
+        "rmse_mwh": 6325.110202342009,
+        "mape_pct": 12.913766766953202,
+        "hours": 720,
+        "mape_hours": 720
+      }
+    },
+    "2025-07": {
+      "prediction": {
+        "mae_mwh": 1863.0557190860216,
+        "rmse_mwh": 2353.607388675188,
+        "mape_pct": 3.8721447885252434,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 3295.7144758064514,
+        "rmse_mwh": 4488.113395437289,
+        "mape_pct": 7.014805090059924,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 2281.5235752688172,
+        "rmse_mwh": 2720.4444581039006,
+        "mape_pct": 4.796703463977057,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-08": {
+      "prediction": {
+        "mae_mwh": 1199.9002673471105,
+        "rmse_mwh": 1580.282134868565,
+        "mape_pct": 2.538950716613917,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 3153.347809139785,
+        "rmse_mwh": 4423.628837181705,
+        "mape_pct": 6.95067419278593,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 1800.8718010752689,
+        "rmse_mwh": 2130.6131600498056,
+        "mape_pct": 3.9369757951342863,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-09": {
+      "prediction": {
+        "mae_mwh": 1057.6625474175348,
+        "rmse_mwh": 1355.150484321219,
+        "mape_pct": 2.5184734831461997,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_48": {
+        "mae_mwh": 3150.2244305555555,
+        "rmse_mwh": 4373.611664408252,
+        "mape_pct": 7.842548109979584,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_168": {
+        "mae_mwh": 1590.2488194444443,
+        "rmse_mwh": 2062.6851227519155,
+        "mape_pct": 3.9225797982318933,
+        "hours": 720,
+        "mape_hours": 720
+      }
+    },
+    "2025-10": {
+      "prediction": {
+        "mae_mwh": 685.9085716985886,
+        "rmse_mwh": 873.3665629334342,
+        "mape_pct": 1.8594486762115954,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 2491.7734139784943,
+        "rmse_mwh": 3555.0092605908676,
+        "mape_pct": 6.947442678078692,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 1003.9383333333333,
+        "rmse_mwh": 1509.9735976833524,
+        "mape_pct": 2.746680964113287,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    },
+    "2025-11": {
+      "prediction": {
+        "mae_mwh": 483.75384233940974,
+        "rmse_mwh": 669.2801380497766,
+        "mape_pct": 1.2698043800975716,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_48": {
+        "mae_mwh": 2700.460430555556,
+        "rmse_mwh": 3914.8068448575077,
+        "mape_pct": 7.35232504236194,
+        "hours": 720,
+        "mape_hours": 720
+      },
+      "lag_168": {
+        "mae_mwh": 961.3093888888889,
+        "rmse_mwh": 1465.5684542757917,
+        "mape_pct": 2.4888649043538793,
+        "hours": 720,
+        "mape_hours": 720
+      }
+    },
+    "2025-12": {
+      "prediction": {
+        "mae_mwh": 805.4896211357526,
+        "rmse_mwh": 1086.4438348042568,
+        "mape_pct": 1.8954110461778104,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_48": {
+        "mae_mwh": 3061.927311827957,
+        "rmse_mwh": 4416.485058056739,
+        "mape_pct": 7.5126411871622,
+        "hours": 744,
+        "mape_hours": 744
+      },
+      "lag_168": {
+        "mae_mwh": 923.3894489247311,
+        "rmse_mwh": 1175.1815381664135,
+        "mape_pct": 2.2134254811353054,
+        "hours": 744,
+        "mape_hours": 744
+      }
+    }
+  },
+  "release_gate_passed": true,
+  "assumptions": [
+    "Historical consumption is treated as available with a 48-hour lag; vintage revisions are not archived.",
+    "Historical simulation is not evidence of forecasts actually issued during 2025.",
+    "Weather excluded: original weather data had no verifiable issuance cutoff.",
+    "No EPIAS superiority claim: the historical comparison CSV has no issuance provenance.",
+    "Final production refit includes 2025; reported test scores belong to the model fit through 2024."
+  ],
+  "evaluation_model_sha256": "07f0d264065e2d840fe1f59755a572e6974b4bade5b05556f5159ee6fdb2357e"
+}

@@ -1,62 +1,313 @@
-from sqlalchemy import create_engine, Column, DateTime, Float
-from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime
+"""Versioned schema: immutable forecast runs, separately reconciled observations.
 
-from src.config import DATABASE_URL
+Existing daily_monitoring tables are deliberately left untouched: they cannot
+establish issuance time and must not be relabeled as day-ahead forecasts.
+"""
+
+from datetime import date, datetime, time, timedelta
+from hashlib import sha256
+import json
+from uuid import uuid4
+
+import pandas as pd
+from sqlalchemy import (
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+    inspect,
+    select,
+    text,
+)
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from src.config import DATABASE_URL, FORECAST_CUTOFF_HOUR
+from src.time_utils import day_hours, hourly_frame, local_timestamp, utc_iso, utc_naive
 
 Base = declarative_base()
+HistoryBase = declarative_base()
 
 
-class DailyMonitoring(Base):
-    __tablename__ = 'daily_monitoring'
-    
+class MonitoringHistory(HistoryBase):
+    """Original records use naive Istanbul timestamps; read without rewriting."""
+
+    __tablename__ = "daily_monitoring"
     date = Column(DateTime, primary_key=True)
     actual_consumption = Column(Float)
     epias_forecast = Column(Float)
     model_prediction = Column(Float)
-    
-    def __repr__(self):
-        return f"<DailyMonitoring(date={self.date}, actual={self.actual_consumption}, forecast={self.epias_forecast}, prediction={self.model_prediction})>"
+
+
+class ForecastRun(Base):
+    __tablename__ = "forecast_runs_v2"
+    id = Column(String(36), primary_key=True)
+    target_date = Column(Date, nullable=False, unique=True, index=True)
+    issued_at = Column(DateTime, nullable=False)
+    model_version = Column(String(64), nullable=False)
+    input_sha256 = Column(String(64), nullable=False)
+    input_snapshot = Column(Text, nullable=False)
+    origin = Column(String(32), nullable=False, default="live")
+    benchmark_status = Column(String(100), nullable=False)
+
+
+class ForecastHour(Base):
+    __tablename__ = "forecast_hours_v2"
+    run_id = Column(String(36), ForeignKey("forecast_runs_v2.id"), primary_key=True)
+    date = Column(DateTime, primary_key=True, index=True)
+    prediction = Column(Float, nullable=False)
+    epias_forecast = Column(Float)
+
+
+class Observation(Base):
+    __tablename__ = "observations_v2"
+    date = Column(DateTime, primary_key=True)
+    consumption = Column(Float, nullable=False)
+    retrieved_at = Column(DateTime, nullable=False)
+
+
+class JobEvent(Base):
+    __tablename__ = "job_events_v2"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    finished_at = Column(DateTime, nullable=False)
+    task = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False)
+    detail = Column(String(300), nullable=False)
 
 
 class Database:
-    def __init__(self, db_url: str = None):
+    def __init__(self, db_url=None):
         url = db_url or DATABASE_URL
-        self.engine = create_engine(url)
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        options = {"pool_pre_ping": True}
+        if url.startswith("sqlite"):
+            options["connect_args"] = {"check_same_thread": False, "timeout": 30}
+            if ":memory:" in url:
+                options["poolclass"] = StaticPool
+        else:
+            options["connect_args"] = {"connect_timeout": 15}
+        self.engine = create_engine(url, **options)
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+    def initialize(self):
         Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
 
-    def upsert_monitoring_data(self, date_val: datetime, actual=None, forecast=None, prediction=None):
-        session = self.Session()
+    def has_history(self):
+        return inspect(self.engine).has_table(MonitoringHistory.__tablename__)
+
+    def healthy(self):
+        with self.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            conn.execute(select(ForecastRun.id).limit(1))
+
+    def get_run(self, target):
+        with self.Session() as session:
+            return session.scalar(
+                select(ForecastRun).where(ForecastRun.target_date == date.fromisoformat(str(target)))
+            )
+
+    def save_forecast(
+        self, result, issued_at, benchmark=None, benchmark_status="unavailable", *, origin="live"
+    ):
+        target = local_timestamp(result.target_date)
+        issue = local_timestamp(issued_at)
+        if origin not in ("live", "historical_simulation"):
+            raise ValueError("Unknown forecast origin")
+        if origin == "live":
+            cutoff = target - pd.Timedelta(days=1) + pd.Timedelta(hours=FORECAST_CUTOFF_HOUR)
+            if issue.date() != (target - pd.Timedelta(days=1)).date() or issue >= cutoff:
+                raise ValueError("Forecast must be issued the previous day before 12:00 Europe/Istanbul")
+        predictions = hourly_frame(result.predictions, "prediction")
+        if not predictions.index.equals(day_hours(target)):
+            raise ValueError("A forecast must contain exactly the target day's 24 hours")
+        comparison = pd.Series(dtype=float)
+        if benchmark is not None and not benchmark.empty:
+            comparison = hourly_frame(benchmark, "lep")["lep"].reindex(day_hours(target))
+        snapshot = dict(result.input_snapshot)
+        snapshot["benchmark"] = {ts.isoformat(): float(value) for ts, value in comparison.dropna().items()}
+        payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        run = ForecastRun(
+            id=str(uuid4()),
+            target_date=target.date(),
+            issued_at=utc_naive(issue),
+            model_version=result.model_version,
+            input_sha256=sha256(payload.encode()).hexdigest(),
+            input_snapshot=payload,
+            origin=origin,
+            benchmark_status=benchmark_status,
+        )
         try:
-            record = session.query(DailyMonitoring).filter_by(date=date_val).first()
-            if not record:
-                record = DailyMonitoring(date=date_val)
-                session.add(record)
-            
-            if actual is not None:
-                record.actual_consumption = actual
-            if forecast is not None:
-                record.epias_forecast = forecast
-            if prediction is not None:
-                record.model_prediction = prediction
-                
-            session.commit()
-        except Exception as e:
-            session.rollback()
-            raise e
-        finally:
-            session.close()
+            with self.Session.begin() as session:
+                session.add(run)
+                session.flush()
+                for ts, row in predictions.iterrows():
+                    value = comparison.get(ts)
+                    session.add(
+                        ForecastHour(
+                            run_id=run.id,
+                            date=utc_naive(ts),
+                            prediction=float(row.prediction),
+                            epias_forecast=float(value) if pd.notna(value) else None,
+                        )
+                    )
+        except IntegrityError:
+            # A concurrent retry can only read the winning run, never replace it.
+            existing = self.get_run(result.target_date)
+            if existing is None:
+                raise
+            return existing
+        return run
 
-    def get_monitoring_data(self):
-        session = self.Session()
-        try:
-            data = session.query(DailyMonitoring).order_by(DailyMonitoring.date).all()
-            return data
-        finally:
-            session.close()
+    def save_actuals(self, frame, retrieved_at):
+        values = hourly_frame(frame, "consumption")
+        with self.Session.begin() as session:
+            for ts, row in values.iterrows():
+                stamp = utc_naive(ts)
+                record = session.get(Observation, stamp)
+                if record is None:
+                    record = Observation(date=stamp)
+                    session.add(record)
+                record.consumption = float(row.consumption)
+                record.retrieved_at = utc_naive(retrieved_at)
+        return len(values)
 
+    def missing_actual_dates(self, before):
+        with self.Session() as session:
+            dates = session.scalars(
+                select(ForecastHour.date)
+                .outerjoin(Observation, ForecastHour.date == Observation.date)
+                .where(Observation.date.is_(None), ForecastHour.date < utc_naive(before))
+            ).all()
+        return sorted({pd.Timestamp(ts, tz="UTC").tz_convert("Europe/Istanbul").date() for ts in dates})
 
-if __name__ == "__main__":
-    db = Database()
-    print("Database initialized.")
+    def record_job(self, task, status, detail, at):
+        with self.Session.begin() as session:
+            session.add(JobEvent(task=task, status=status, detail=detail[:300], finished_at=utc_naive(at)))
+
+    def history_series(self, start, end):
+        if not self.has_history():
+            return []
+        with self.Session() as session:
+            rows = session.scalars(
+                select(MonitoringHistory)
+                .where(
+                    MonitoringHistory.date >= datetime.combine(start, time.min),
+                    MonitoringHistory.date < datetime.combine(end + timedelta(days=1), time.min),
+                )
+                .order_by(MonitoringHistory.date)
+            ).all()
+            return [
+                {
+                    "date": utc_iso(utc_naive(row.date)),
+                    "prediction": row.model_prediction,
+                    "epias_forecast": row.epias_forecast,
+                    "actual": row.actual_consumption,
+                    "actual_retrieved_at": None,
+                    "run_id": None,
+                    "issued_at": None,
+                    "model_version": None,
+                    "origin": "historical_monitoring",
+                    "benchmark_status": "recorded",
+                }
+                for row in rows
+            ]
+
+    def series(self, start, end, source="all"):
+        if source not in ("all", "recorded", "issued"):
+            raise ValueError("Unknown data series")
+        history = self.history_series(start, end) if source != "issued" else []
+        if source == "recorded":
+            return history
+        with self.Session() as session:
+            records = session.execute(
+                select(ForecastHour, ForecastRun, Observation)
+                .join(ForecastRun, ForecastHour.run_id == ForecastRun.id)
+                .outerjoin(Observation, ForecastHour.date == Observation.date)
+                .where(ForecastRun.target_date >= start, ForecastRun.target_date <= end)
+                .order_by(ForecastHour.date)
+            ).all()
+            issued = [
+                {
+                    "date": utc_iso(hour.date),
+                    "prediction": hour.prediction,
+                    "epias_forecast": hour.epias_forecast,
+                    "actual": actual.consumption if actual else None,
+                    "actual_retrieved_at": utc_iso(actual.retrieved_at) if actual else None,
+                    "run_id": run.id,
+                    "issued_at": utc_iso(run.issued_at),
+                    "model_version": run.model_version,
+                    "origin": run.origin,
+                    "benchmark_status": run.benchmark_status,
+                }
+                for hour, run, actual in records
+            ]
+        combined = {row["date"]: row for row in history}
+        combined.update({row["date"]: row for row in issued})
+        return sorted(combined.values(), key=lambda row: row["date"])
+
+    def status(self):
+        history_first = history_last = history_actual = None
+        history_hours = 0
+        if self.has_history():
+            with self.Session() as session:
+                history_first, history_last, history_hours = session.execute(
+                    select(
+                        func.min(MonitoringHistory.date),
+                        func.max(MonitoringHistory.date),
+                        func.count(MonitoringHistory.date),
+                    )
+                ).one()
+                history_actual = session.scalar(
+                    select(func.max(MonitoringHistory.date)).where(
+                        MonitoringHistory.actual_consumption.is_not(None)
+                    )
+                )
+        with self.Session() as session:
+            latest = session.scalar(select(ForecastRun).order_by(ForecastRun.target_date.desc()).limit(1))
+            first = session.scalar(select(func.min(ForecastRun.target_date)))
+            last_actual = session.scalar(select(func.max(Observation.date)))
+            refreshed = session.scalar(select(func.max(Observation.retrieved_at)))
+            events = session.scalars(select(JobEvent).order_by(JobEvent.id.desc()).limit(10)).all()
+            starts = [d for d in (first, history_first.date() if history_first else None) if d]
+            ends = [
+                d
+                for d in (
+                    latest.target_date if latest else None,
+                    history_last.date() if history_last else None,
+                )
+                if d
+            ]
+            actual_dates = [
+                d for d in (last_actual, utc_naive(history_actual) if history_actual else None) if d
+            ]
+            return {
+                "first_target_date": str(min(starts)) if starts else None,
+                "latest_target_date": str(max(ends)) if ends else None,
+                "first_issued_date": str(first) if first else None,
+                "latest_issued_date": str(latest.target_date) if latest else None,
+                "history_first_date": str(history_first.date()) if history_first else None,
+                "history_latest_date": str(history_last.date()) if history_last else None,
+                "history_hours": history_hours,
+                "latest_issued_at": utc_iso(latest.issued_at) if latest else None,
+                "model_version": latest.model_version if latest else None,
+                "origin": latest.origin if latest else "historical_monitoring" if history_hours else None,
+                "latest_actual_at": utc_iso(max(actual_dates)) if actual_dates else None,
+                "actuals_refreshed_at": utc_iso(refreshed),
+                "jobs": [
+                    {
+                        "task": e.task,
+                        "status": e.status,
+                        "detail": e.detail,
+                        "finished_at": utc_iso(e.finished_at),
+                    }
+                    for e in events
+                ],
+            }

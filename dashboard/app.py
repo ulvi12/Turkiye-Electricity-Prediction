@@ -1,144 +1,247 @@
-import streamlit as st
+"""Electricity demand monitoring and model evaluation."""
+
+from datetime import date, timedelta
+from pathlib import Path
+import os
+import sys
+
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import sys, os
+import requests
+import streamlit as st
+from dotenv import load_dotenv
 
-# project root to path so Streamlit can find the src package
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dashboard.client import ForecastClient
+from src.metrics import evaluate_records
 
-from src.database import Database
+load_dotenv()
+st.set_page_config(page_title="Türkiye Electricity Forecast", page_icon="⚡", layout="wide")
+st.markdown(
+    """
+<style>
+.block-container { max-width: 1400px; padding-top: 3.5rem; }
+h1, h2, h3 { color: #172c46; }
+[data-testid="stMetric"] { background: #fff; border: 1px solid #e3e8ef; border-radius: 10px; padding: 16px; }
+[data-testid="stMetricLabel"] { color: #54657b; }
+[data-testid="stMetricValue"] { color: #172c46; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
-st.set_page_config(page_title="Türkiye's Electricity Consumption Prediction", layout="wide")
 
-st.title("Türkiye's Electricity Consumption Prediction")
-st.caption("Day-ahead forecasting of Türkiye's hourly electricity consumption.")
-st.caption("Comparing our XGBoost model predictions vs. EPIAS official forecast against actual consumption.")
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch(route, **params):
+    def setting(name):
+        if os.getenv(name):
+            return os.getenv(name)
+        try:
+            return st.secrets.get(name)
+        except FileNotFoundError:
+            return None
+
+    client = ForecastClient(setting("API_BASE_URL"), setting("DATABASE_URL") or setting("SUPABASE_DB_URL"))
+    return client.get(route, **params)
 
 
-@st.cache_resource
-def get_db():
-    return Database()
+def frame_from(records):
+    frame = pd.DataFrame(records)
+    frame["date"] = pd.to_datetime(frame.date, utc=True).dt.tz_convert("Europe/Istanbul")
+    return frame.sort_values("date")
 
 
-db = get_db()
-data = db.get_monitoring_data()
+def plot_consumption(frame, daily=False):
+    values = frame.set_index("date")[["actual", "prediction", "epias_forecast"]].apply(pd.to_numeric)
+    if daily:
+        # An incomplete day must not appear as an artificially low daily total.
+        values = values.resample("D").sum(min_count=24) / 1000
+    else:
+        values = values.reindex(pd.date_range(values.index.min(), values.index.max(), freq="h"))
+    fig = go.Figure()
+    for key, name, color, dash in [
+        ("actual", "Actual consumption", "#1d3553", "solid"),
+        ("prediction", "XGBoost", "#07897e", "solid"),
+        ("epias_forecast", "EPIAS", "#d39436", "dot"),
+    ]:
+        if values[key].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=values.index,
+                    y=values[key],
+                    name=name,
+                    mode="lines+markers" if len(values) <= 7 else "lines",
+                    line={"color": color, "width": 2.5, "dash": dash},
+                    connectgaps=False,
+                )
+            )
+    fig.update_layout(
+        height=410,
+        margin={"l": 12, "r": 12, "t": 25, "b": 10},
+        template="plotly_white",
+        legend={"orientation": "h", "y": 1.12},
+        hovermode="x unified",
+        xaxis_title=None,
+        yaxis_title="Daily consumption · GWh" if daily else "Hourly consumption · MWh",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-if not data:
-    st.warning("No data found in monitoring database.")
+
+def metric_cards(metrics):
+    # Head-to-head cards use the same rows for BOTH forecasts.
+    model = metrics["paired_model"] or metrics["model"]
+    epias = metrics["epias"]
+    columns = st.columns(3)
+    for column, key, label, unit in zip(
+        columns, ["mae_mwh", "rmse_mwh", "mape_pct"], ["MAE", "RMSE", "MAPE"], ["MWh", "MWh", "%"]
+    ):
+        value = model[key] if model else None
+        delta = None
+        if value is not None and epias and epias[key] is not None:
+            suffix = "pp" if key == "mape_pct" else "MWh"
+            delta = f"{value - epias[key]:+,.2f} {suffix} vs EPIAS"
+        column.metric(
+            label, f"{value:,.2f} {unit}" if value is not None else "—", delta=delta, delta_color="inverse"
+        )
+        if epias and epias[key] is not None:
+            column.caption(f"EPIAS: {epias[key]:,.2f} {unit}")
+    hours = metrics["comparison_hours"] if epias else metrics["observed_hours"]
+    st.caption(
+        f"{hours:,} evaluated hours · {metrics['forecast_hours']:,} / "
+        f"{metrics['expected_hours']:,} forecast hours available · Lower error is better."
+    )
+    if model and model["mape_hours"] < model["hours"]:
+        st.caption("MAPE excludes zero-consumption hours; MAE and RMSE include them.")
+
+
+st.title("Türkiye Electricity Forecast")
+st.caption(
+    "National electricity demand · XGBoost predictions compared with EPIAS forecasts and actual consumption"
+)
+
+try:
+    status = fetch("/status")
+except (requests.RequestException, ValueError) as error:
+    explanations = {
+        "authentication": "Supabase rejected the database credentials. Check the username and password in SUPABASE_DB_URL.",
+        "dns": "The Supabase database hostname could not be resolved from this computer.",
+        "network_route": "This computer cannot reach the Supabase database address. Use the Supabase session-pooler connection string for local IPv4 access.",
+        "timeout": "The Supabase database connection timed out. Check the network and database availability.",
+        "tls": "The secure Supabase database connection could not be established.",
+    }
+    reason = explanations.get(str(error), "The configured database could not be reached from this computer.")
+    st.error(reason)
+    st.caption("The connection string is not displayed or logged.")
+    if st.button("Retry"):
+        st.cache_data.clear()
+        st.rerun()
+    st.stop()
+
+if not status["latest_target_date"]:
+    st.info("No monitoring records are available in the connected database.")
+    st.stop()
+
+has_history = bool(status["history_hours"])
+has_issued = bool(status["latest_issued_date"])
+source = "recorded" if has_history else "issued"
+
+if has_history and has_issued:
+    choice = st.radio("Data series", ["Recorded monitoring", "Issued forecasts"], horizontal=True)
+    source = "recorded" if choice == "Recorded monitoring" else "issued"
+
+if source == "recorded":
+    first = date.fromisoformat(status["history_first_date"])
+    last = date.fromisoformat(status["history_latest_date"])
 else:
-    records = []
-    for r in data:
-        records.append({
-            'date': r.date,
-            'Actual': r.actual_consumption,
-            'EPIAS Forecast': r.epias_forecast,
-            'Model Prediction': r.model_prediction
-        })
-    df = pd.DataFrame(records)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date')
+    first = date.fromisoformat(status["first_issued_date"])
+    last = date.fromisoformat(status["latest_issued_date"])
 
-    tab1, tab2 = st.tabs(["Daily View", "Cumulative View"])
+info_column, refresh_column = st.columns([6, 1])
+info_column.caption(f"Data available: {first:%d %b %Y} — {last:%d %b %Y} · Istanbul time (UTC+03)")
+if refresh_column.button("Refresh", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+overview, daily = st.tabs(["Performance history", "Daily comparison"])
 
-    with tab1:
-        st.header("Daily Performance")
-        
-        available_dates = df['date'].dt.date.unique()
-        if len(available_dates) > 0:
-            default_date = available_dates[-1] if len(available_dates) > 1 else available_dates[-1]
+try:
+    with overview:
+        dates = st.date_input(
+            "Date range",
+            (max(first, last - timedelta(days=365)), last),
+            min_value=first,
+            max_value=last,
+            key=f"history_range_{source}",
+        )
+        if len(dates) != 2:
+            st.info("Choose an end date to view the selected period.")
+        elif (dates[1] - dates[0]).days > 365:
+            st.info("Select up to 366 days at a time.")
         else:
-            default_date = datetime.now().date() - timedelta(days=1)
-            
-        min_allowed = datetime(2026, 2, 15).date()
-        selected_date = st.date_input("Select Date", max(default_date, min_allowed), min_value=min_allowed)
-        
-        daily_mask = (df['date'].dt.date == selected_date)
-        daily_df = df.loc[daily_mask]
-        
-        if not daily_df.empty:
-            d_col1, d_col2, d_col3 = st.columns(3)
-            
-            valid_daily = daily_df.dropna()
-            
-            if not valid_daily.empty:
-                d_mae_model = (valid_daily['Actual'] - valid_daily['Model Prediction']).abs().mean()
-                d_mae_epias = (valid_daily['Actual'] - valid_daily['EPIAS Forecast']).abs().mean()
-                
-                d_mape_model = ((valid_daily['Actual'] - valid_daily['Model Prediction']).abs() / valid_daily['Actual']).mean() * 100
-                d_mape_epias = ((valid_daily['Actual'] - valid_daily['EPIAS Forecast']).abs() / valid_daily['Actual']).mean() * 100
-                
-                d_rmse_model = ((valid_daily['Actual'] - valid_daily['Model Prediction']) ** 2).mean() ** 0.5
-                d_rmse_epias = ((valid_daily['Actual'] - valid_daily['EPIAS Forecast']) ** 2).mean() ** 0.5
-
-                d_col1.metric("XGBoost MAE", f"{d_mae_model:.2f}", delta=f"{(d_mae_model-d_mae_epias):.2f} vs EPIAS Forecast", delta_color="inverse")
-                d_col2.metric("XGBoost MAPE", f"{d_mape_model:.2f}%", delta=f"{(d_mape_model-d_mape_epias):.2f}% vs EPIAS Forecast", delta_color="inverse")
-                d_col3.metric("XGBoost RMSE", f"{d_rmse_model:.2f}", delta=f"{(d_rmse_model-d_rmse_epias):.2f} vs EPIAS Forecast", delta_color="inverse")
-                
-                d_col1.info(f"EPIAS Forecast MAE: {d_mae_epias:.2f}")
-                d_col2.info(f"EPIAS Forecast MAPE: {d_mape_epias:.2f}%")
-                d_col3.info(f"EPIAS Forecast RMSE: {d_rmse_epias:.2f}")
-
+            start, end = dates
+            records = fetch("/forecasts", start=str(start), end=str(end), source=source)["records"]
+            if not records:
+                st.info("No records in the selected date range.")
             else:
-                st.warning("Incomplete data for this date.")
+                metrics = evaluate_records(records, ((end - start).days + 1) * 24)
+                metric_cards(metrics)
+                frame = frame_from(records)
+                st.subheader("Consumption over time")
+                plot_consumption(frame, daily=True)
+                with st.expander("Monthly performance"):
+                    rows = []
+                    for month, subset in frame.groupby(frame.date.dt.strftime("%Y-%m")):
+                        result = evaluate_records(subset.to_dict("records"))
+                        model = result["paired_model"] or result["model"]
+                        epias = result["epias"]
+                        if model:
+                            rows.append(
+                                {
+                                    "Month": month,
+                                    "XGBoost MAE (MWh)": model["mae_mwh"],
+                                    "EPIAS MAE (MWh)": epias["mae_mwh"] if epias else None,
+                                    "XGBoost MAPE (%)": model["mape_pct"],
+                                    "EPIAS MAPE (%)": epias["mape_pct"] if epias else None,
+                                    "Evaluated hours": model["hours"],
+                                }
+                            )
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                with st.expander("Hourly records"):
+                    columns = ["date", "actual", "prediction", "epias_forecast"]
+                    st.dataframe(frame[columns], hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "Download CSV",
+                        frame[columns].to_csv(index=False),
+                        "electricity-demand.csv",
+                        "text/csv",
+                    )
 
-            # Daily time series plot
-            st.subheader("Hourly Comparison")
-            fig_daily = go.Figure()
-            fig_daily.add_trace(go.Scatter(x=daily_df['date'], y=daily_df['Actual'], name='Actual', line=dict(color='#3498db', dash='dash')))
-            fig_daily.add_trace(go.Scatter(x=daily_df['date'], y=daily_df['EPIAS Forecast'], name='EPIAS Forecast', line=dict(color='#e74c3c')))
-            fig_daily.add_trace(go.Scatter(x=daily_df['date'], y=daily_df['Model Prediction'], name='XGBoost Forecast', line=dict(color='#2ecc71')))
-            fig_daily.update_layout(xaxis_title="Hour", yaxis_title="MWh", template="plotly_white")
-            st.plotly_chart(fig_daily, use_container_width=True)
-            
-            with st.expander("Show Raw Data"):
-                st.dataframe(daily_df, use_container_width=True)
+    with daily:
+        selected = st.date_input("Date", last, min_value=first, max_value=last, key=f"daily_date_{source}")
+        records = fetch("/forecasts", start=str(selected), end=str(selected), source=source)["records"]
+        if not records:
+            st.info("No records are available for this date.")
         else:
-            st.info(f"No data available for {selected_date}")
+            frame = frame_from(records)
+            metric_cards(evaluate_records(records, 24))
+            plot_consumption(frame)
+            if not frame.actual.notna().any():
+                st.caption("Actual consumption will appear when it becomes available.")
 
-    with tab2:
-        st.header("Cumulative Performance")
-        
-        min_allowed = datetime(2026, 2, 15).date()
-        min_date = max(df['date'].min().date(), min_allowed)
-        max_date = df['date'].max().date()
-        
-        date_range = st.date_input("Select Date Range", [min_date, max_date], min_value=min_allowed, key='cum_range')
-        
-        if len(date_range) == 2:
-            start_d, end_d = date_range
-            mask = (df['date'].dt.date >= start_d) & (df['date'].dt.date <= end_d)
-            filtered_df = df.loc[mask]
+    with st.expander("About the results"):
+        if source == "recorded":
+            st.write(
+                "This view preserves the project's recorded monitoring history. Original prediction issuance "
+                "times were not stored, so these comparisons are reported as historical monitoring results."
+            )
         else:
-            filtered_df = df
-            
-        valid_cum = filtered_df.dropna()
-        
-        if not valid_cum.empty:
-            c_col1, c_col2, c_col3 = st.columns(3)
-            
-            c_mae_model = (valid_cum['Actual'] - valid_cum['Model Prediction']).abs().mean()
-            c_mae_epias = (valid_cum['Actual'] - valid_cum['EPIAS Forecast']).abs().mean()
-            c_mape_epias = ((valid_cum['Actual'] - valid_cum['EPIAS Forecast']).abs() / valid_cum['Actual']).mean() * 100
-            c_mape_model = ((valid_cum['Actual'] - valid_cum['Model Prediction']).abs() / valid_cum['Actual']).mean() * 100
-            c_rmse_epias = ((valid_cum['Actual'] - valid_cum['EPIAS Forecast']) ** 2).mean() ** 0.5
-            c_rmse_model = ((valid_cum['Actual'] - valid_cum['Model Prediction']) ** 2).mean() ** 0.5
-            
-            c_col1.metric("XGBoost MAE", f"{c_mae_model:.2f}", delta=f"{(c_mae_model-c_mae_epias):.2f} vs EPIAS Forecast", delta_color="inverse")
-            c_col2.metric("XGBoost MAPE", f"{c_mape_model:.2f}%", delta=f"{(c_mape_model-c_mape_epias):.2f}% vs EPIAS Forecast", delta_color="inverse")
-            c_col3.metric("XGBoost RMSE", f"{c_rmse_model:.2f}", delta=f"{(c_rmse_model-c_rmse_epias):.2f} vs EPIAS Forecast", delta_color="inverse")
-            
-            c_col1.info(f"EPIAS Forecast MAE: {c_mae_epias:.2f}")
-            c_col2.info(f"EPIAS Forecast MAPE: {c_mape_epias:.2f}%")
-            c_col3.info(f"EPIAS Forecast RMSE: {c_rmse_epias:.2f}")
-            
-            # Overall time series
-            st.subheader("Time Series Overview")
-            fig_all = go.Figure()
-            fig_all.add_trace(go.Scatter(x=valid_cum['date'], y=valid_cum['Actual'], name='Actual', line=dict(color='#3498db', dash='dash', width=1)))
-            fig_all.add_trace(go.Scatter(x=valid_cum['date'], y=valid_cum['Model Prediction'], name='XGBoost Forecast', line=dict(color='#2ecc71', width=1)))
-            fig_all.add_trace(go.Scatter(x=valid_cum['date'], y=valid_cum['EPIAS Forecast'], name='EPIAS Forecast', line=dict(color='#e74c3c', width=1)))
-            fig_all.update_layout(xaxis_title="Date", yaxis_title="MWh", template="plotly_white")
-            st.plotly_chart(fig_all, use_container_width=True)
-        else:
-            st.info("No valid data for selected range.")
+            st.write(
+                "These predictions were stored before the target day. Each run preserves its issuance time, "
+                "model fingerprint, and input snapshot. Actual consumption is collected separately."
+            )
+        st.write(
+            "MAE and RMSE are measured in MWh. MAPE is a percentage; differences in MAPE are percentage "
+            "points. EPIAS comparisons use identical evaluated hours. Incomplete days are omitted from "
+            "the daily-total chart and remain available in the hourly table."
+        )
+except (requests.RequestException, ValueError, KeyError):
+    st.error("The selected data could not be loaded. Please refresh and try again.")

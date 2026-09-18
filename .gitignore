@@ -3,9 +3,18 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.cache/
+.pytest_cache/
+.ruff_cache/
+artifacts/
+*.db-shm
+*.db-wal
 
 # Environment
 .env
+.env.*
+!.env.example
+.streamlit/secrets.toml
 
 # Database
 *.db
