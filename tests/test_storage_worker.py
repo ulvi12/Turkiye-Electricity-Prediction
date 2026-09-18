@@ -104,7 +104,8 @@ def test_actuals_recovery_respects_horizon(db, result):
     class Loader:
         def get_realtime_consumption(self, start, end):
             requested.append(start)
-            return pd.DataFrame({"date": day_hours(start), "consumption": 40000})
+            dates = pd.date_range(local_timestamp(start), local_timestamp(end) + pd.Timedelta(hours=23), freq="h")
+            return pd.DataFrame({"date": dates, "consumption": 40000})
 
     daily_run.reconcile_actuals(db, Loader(), 1, lambda: local_timestamp("2026-02-01 10:00"))
     assert date(2026, 1, 1) not in requested
@@ -124,7 +125,8 @@ def test_actuals_recovery_repairs_history_without_rewriting_it(db, populate_hist
     class Loader:
         def get_realtime_consumption(self, start, end):
             requested.append(start)
-            return pd.DataFrame({"date": day_hours(start), "consumption": 42000})
+            dates = pd.date_range(local_timestamp(start), local_timestamp(end) + pd.Timedelta(hours=23), freq="h")
+            return pd.DataFrame({"date": dates, "consumption": 42000})
 
     daily_run.reconcile_actuals(db, Loader(), 7, lambda: local_timestamp("2026-06-01 10:00"))
 

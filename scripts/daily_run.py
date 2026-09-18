@@ -48,20 +48,19 @@ def reconcile_actuals(db, loader, lookback_days=365, clock=now_local):
     # records still have missing actuals. Repeated runs are idempotent.
     dates = {(today - pd.Timedelta(days=1)).date()}
     dates.update(db.missing_actual_dates(today, since))
+    targets = sorted(dates)
     failures = []
-    for target in sorted(dates):
-        try:
-            actuals = loader.get_realtime_consumption(target, target)
-            if actuals.empty:
-                failures.append(str(target))
-                continue
+    try:
+        actuals = loader.get_realtime_consumption(targets[0], targets[-1])
+        if not actuals.empty:
             db.save_actuals(actuals, clock())
-            received = pd.DatetimeIndex(actuals.date)
-            if len(received.intersection(day_hours(target))) != 24:
-                failures.append(str(target))
-        except Exception:
-            logger.warning("Actuals unavailable for %s; will retry on the next run", target)
-            failures.append(str(target))
+        received = pd.DatetimeIndex(actuals.date)
+        failures = [
+            str(target) for target in targets if len(received.intersection(day_hours(target))) != 24
+        ]
+    except Exception:
+        logger.warning("Historical actuals unavailable; will retry on the next run")
+        failures = [str(target) for target in targets]
     if failures:
         raise RuntimeError(f"Actuals incomplete for {len(failures)} day(s): {', '.join(failures[:10])}")
 
