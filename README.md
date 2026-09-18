@@ -8,7 +8,7 @@ An end-to-end machine learning project for forecasting Türkiye's hourly electri
 
 Power systems must schedule generation before electricity is consumed. Errors in the next day's demand forecast make balancing supply and demand harder and more expensive.
 
-The problem is particularly relevant in Türkiye: electricity demand grew by almost 5% per year from 2005 to 2024—the fastest rate among IEA member countries—and continued growth is expected alongside expanding wind and solar generation. Accurate short-term forecasts support more efficient scheduling, market decisions, and grid operation. [IEA: Türkiye 2026](https://www.iea.org/reports/turkiye-2026/executive-summary)
+The problem is particularly relevant in Türkiye: electricity demand grew by almost 5% per year from 2005 to 2024, the fastest rate among IEA member countries, and continued growth is expected alongside expanding wind and solar generation. Accurate short-term forecasts support more efficient scheduling, market decisions, and grid operation. [IEA: Türkiye 2026](https://www.iea.org/reports/turkiye-2026/executive-summary)
 
 ## System design
 
