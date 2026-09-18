@@ -228,6 +228,37 @@ class Database:
             {pd.Timestamp(ts, tz="UTC").tz_convert("Europe/Istanbul").date() for ts in missing_stamps}
         )
 
+    def missing_forecast_dates(self, before, since):
+        """Return past days without a complete recorded or versioned forecast."""
+        before_date = local_timestamp(before).date()
+        since_date = local_timestamp(since).date()
+        if since_date >= before_date:
+            return []
+        candidates = set(pd.date_range(since_date, before_date - timedelta(days=1), freq="D").date)
+        with self.Session() as session:
+            stored = set(
+                session.scalars(
+                    select(ForecastRun.target_date).where(
+                        ForecastRun.target_date >= since_date,
+                        ForecastRun.target_date < before_date,
+                    )
+                ).all()
+            )
+            candidates.difference_update(stored)
+            if self.has_history() and candidates:
+                rows = session.execute(
+                    select(MonitoringHistory.date, MonitoringHistory.model_prediction).where(
+                        MonitoringHistory.date >= datetime.combine(since_date, time.min),
+                        MonitoringHistory.date < datetime.combine(before_date, time.min),
+                    )
+                ).all()
+                coverage = {}
+                for stamp, prediction in rows:
+                    if prediction is not None:
+                        coverage.setdefault(stamp.date(), set()).add(stamp.hour)
+                candidates = {day for day in candidates if len(coverage.get(day, set())) < 24}
+        return sorted(candidates)
+
     def record_job(self, task, status, detail, at):
         with self.Session.begin() as session:
             session.add(JobEvent(task=task, status=status, detail=detail[:300], finished_at=utc_naive(at)))
@@ -282,13 +313,16 @@ class Database:
         if source == "recorded":
             return history
         with self.Session() as session:
-            records = session.execute(
+            issued_query = (
                 select(ForecastHour, ForecastRun, Observation)
                 .join(ForecastRun, ForecastHour.run_id == ForecastRun.id)
                 .outerjoin(Observation, ForecastHour.date == Observation.date)
                 .where(ForecastRun.target_date >= start, ForecastRun.target_date <= end)
                 .order_by(ForecastHour.date)
-            ).all()
+            )
+            if source == "issued":
+                issued_query = issued_query.where(ForecastRun.origin == "live")
+            records = session.execute(issued_query).all()
             issued = [
                 {
                     "date": utc_iso(hour.date),
@@ -326,16 +360,32 @@ class Database:
                     )
                 )
         with self.Session() as session:
-            latest = session.scalar(select(ForecastRun).order_by(ForecastRun.target_date.desc()).limit(1))
-            first = session.scalar(select(func.min(ForecastRun.target_date)))
+            latest_any = session.scalar(
+                select(ForecastRun).order_by(ForecastRun.target_date.desc()).limit(1)
+            )
+            latest = session.scalar(
+                select(ForecastRun)
+                .where(ForecastRun.origin == "live")
+                .order_by(ForecastRun.target_date.desc())
+                .limit(1)
+            )
+            first_any = session.scalar(select(func.min(ForecastRun.target_date)))
+            first = session.scalar(
+                select(func.min(ForecastRun.target_date)).where(ForecastRun.origin == "live")
+            )
+            first_simulated, latest_simulated = session.execute(
+                select(func.min(ForecastRun.target_date), func.max(ForecastRun.target_date)).where(
+                    ForecastRun.origin == "historical_simulation"
+                )
+            ).one()
             last_actual = session.scalar(select(func.max(Observation.date)))
             refreshed = session.scalar(select(func.max(Observation.retrieved_at)))
             events = session.scalars(select(JobEvent).order_by(JobEvent.id.desc()).limit(10)).all()
-            starts = [d for d in (first, history_first.date() if history_first else None) if d]
+            starts = [d for d in (first_any, history_first.date() if history_first else None) if d]
             ends = [
                 d
                 for d in (
-                    latest.target_date if latest else None,
+                    latest_any.target_date if latest_any else None,
                     history_last.date() if history_last else None,
                 )
                 if d
@@ -348,6 +398,8 @@ class Database:
                 "latest_target_date": str(max(ends)) if ends else None,
                 "first_issued_date": str(first) if first else None,
                 "latest_issued_date": str(latest.target_date) if latest else None,
+                "first_simulated_date": str(first_simulated) if first_simulated else None,
+                "latest_simulated_date": str(latest_simulated) if latest_simulated else None,
                 "history_first_date": str(history_first.date()) if history_first else None,
                 "history_latest_date": str(history_last.date()) if history_last else None,
                 "history_hours": history_hours,

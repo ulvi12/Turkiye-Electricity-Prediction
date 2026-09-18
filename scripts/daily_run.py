@@ -66,6 +66,55 @@ def reconcile_actuals(db, loader, lookback_days=365, clock=now_local):
         raise RuntimeError(f"Actuals incomplete for {len(failures)} day(s): {', '.join(failures[:10])}")
 
 
+def backfill_forecast_gaps(db, loader, lookback_days=365, clock=now_local, pipeline_factory=InferencePipeline):
+    """Fill past forecast gaps with leakage-safe, explicitly simulated runs."""
+    today = local_timestamp(clock()).normalize()
+    pipeline = pipeline_factory(loader=loader)
+    training_end = local_timestamp(pipeline.metadata["training_end"]).normalize()
+    since = max(today - pd.Timedelta(days=lookback_days), training_end + pd.Timedelta(days=1))
+    targets = db.missing_forecast_dates(today, since)
+    if not targets:
+        return 0
+
+    first, last = local_timestamp(targets[0]).normalize(), local_timestamp(targets[-1]).normalize()
+    # One bounded fetch is reused for every target. predict_from_history applies
+    # its own per-target cutoff and discards all timestamps after target - 48h.
+    history = loader.get_realtime_consumption(first - pd.Timedelta(days=10), last - pd.Timedelta(days=2))
+    try:
+        benchmarks = loader.get_load_estimation_plan(first, last)
+    except Exception:
+        logger.warning("Historical operator forecasts unavailable; simulations will omit the benchmark")
+        benchmarks = pd.DataFrame(columns=["date", "lep"])
+
+    completed, failures = 0, []
+    for target in targets:
+        try:
+            result = pipeline.predict_from_history(target, history)
+            target_hours = day_hours(target)
+            benchmark = benchmarks.loc[pd.DatetimeIndex(benchmarks.date).isin(target_hours)]
+            result.input_snapshot["simulation"] = {
+                "generated_at": local_timestamp(clock()).isoformat(),
+                "availability_lag_hours": 48,
+                "label": "historical_simulation",
+            }
+            db.save_forecast(
+                result,
+                clock(),
+                benchmark,
+                "historical_record" if len(benchmark) == 24 else "partial_or_unavailable",
+                origin="historical_simulation",
+            )
+            completed += 1
+        except Exception:
+            logger.warning("Historical simulation failed for %s", target)
+            failures.append(str(target))
+    if failures:
+        raise RuntimeError(
+            f"Historical simulations incomplete for {len(failures)} day(s): {', '.join(failures[:10])}"
+        )
+    return completed
+
+
 def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
     db, loader = db or Database(), loader or DataLoader()
     db.initialize()
@@ -75,6 +124,9 @@ def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
         tasks.append(("forecast", lambda: issue_forecast(db, loader, clock)))
     if mode in ("all", "actuals"):
         tasks.append(("actuals", lambda: reconcile_actuals(db, loader, lookback_days, clock)))
+        tasks.append(
+            ("forecast_backfill", lambda: backfill_forecast_gaps(db, loader, lookback_days, clock))
+        )
     for name, task in tasks:
         try:
             task()

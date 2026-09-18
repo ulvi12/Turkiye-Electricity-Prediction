@@ -47,7 +47,7 @@ flowchart LR
 
 The worker runs in Docker through GitHub Actions. It publishes the next day's 24-hour forecast before the project's noon Istanbul cutoff, then reconciles observed consumption independently.
 
-Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. A rolling 365-day integrity check fills missing observations without overwriting predictions or historical records.
+Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. A rolling 365-day integrity check fills missing observations and creates clearly labeled historical simulations for missing forecast dates. Simulations enforce the same 48-hour consumption cutoff and remain separate from genuinely issued forecasts.
 
 FastAPI serves stored results to Streamlit. The dashboard provides a full-history comparison, daily demand curves, monthly error summaries, and hourly data export. It reads the original monitoring records alongside the newer forecast schema, with separate evaluation views for their different recording methods.
 

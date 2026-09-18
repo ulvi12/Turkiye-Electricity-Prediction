@@ -3,6 +3,7 @@ import json
 import pandas as pd
 import pytest
 from scripts import daily_run
+from src.inference import ForecastResult
 from src.time_utils import day_hours, local_timestamp
 
 ISSUE = local_timestamp("2025-12-31 10:00")
@@ -133,6 +134,57 @@ def test_actuals_recovery_repairs_history_without_rewriting_it(db, populate_hist
     assert repaired[7]["actual_retrieved_at"] is not None
     with db.Session() as session:
         assert session.get(MonitoringHistory, missing_stamp).actual_consumption is None
+
+
+def test_forecast_gap_backfill_is_simulated_and_not_issued(db):
+    requested = []
+
+    class Loader:
+        def get_realtime_consumption(self, start, end):
+            requested.append((local_timestamp(start), local_timestamp(end)))
+            dates = pd.date_range(start, end + pd.Timedelta(hours=23), freq="h")
+            return pd.DataFrame({"date": dates, "consumption": 40000})
+
+        def get_load_estimation_plan(self, start, end):
+            return pd.DataFrame(columns=["date", "lep"])
+
+    class Pipeline:
+        def __init__(self, **kwargs):
+            self.metadata = {"training_end": "2025-12-31T23:00:00+03:00"}
+
+        def predict_from_history(self, target, history):
+            return ForecastResult(
+                str(target),
+                "b" * 64,
+                pd.DataFrame({"date": day_hours(target), "prediction": 39000}),
+                {"history_cutoff": str(local_timestamp(target) - pd.Timedelta(days=2))},
+            )
+
+    count = daily_run.backfill_forecast_gaps(
+        db,
+        Loader(),
+        2,
+        lambda: local_timestamp("2026-01-04 10:00"),
+        Pipeline,
+    )
+
+    assert count == 2
+    assert requested[0][1] == local_timestamp("2026-01-01")
+    assert db.series(date(2026, 1, 2), date(2026, 1, 3), "issued") == []
+    rows = db.series(date(2026, 1, 2), date(2026, 1, 3), "all")
+    assert len(rows) == 48
+    assert {row["origin"] for row in rows} == {"historical_simulation"}
+    status = db.status()
+    assert status["latest_issued_date"] is None
+    assert status["first_simulated_date"] == "2026-01-02"
+    assert status["latest_simulated_date"] == "2026-01-03"
+
+
+def test_complete_recorded_days_are_not_backfilled(db, populate_history):
+    populate_history(db)
+    assert db.missing_forecast_dates(
+        local_timestamp("2026-03-02"), local_timestamp("2026-03-01")
+    ) == []
 
 
 def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):

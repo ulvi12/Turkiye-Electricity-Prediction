@@ -88,6 +88,16 @@ def plot_consumption(frame, daily=False):
 
 
 def metric_cards(metrics):
+    label = None
+    if "by_origin" in metrics:
+        for origin, description in (
+            ("historical_monitoring", "recorded monitoring"),
+            ("live", "issued forecasts"),
+            ("historical_simulation", "historical simulations"),
+        ):
+            if origin in metrics["by_origin"]:
+                metrics, label = metrics["by_origin"][origin], description
+                break
     # Head-to-head cards use the same rows for BOTH forecasts.
     model = metrics["paired_model"] or metrics["model"]
     epias = metrics["epias"]
@@ -110,6 +120,8 @@ def metric_cards(metrics):
         f"{hours:,} evaluated hours · {metrics['forecast_hours']:,} / "
         f"{metrics['expected_hours']:,} forecast hours available · Lower error is better."
     )
+    if label:
+        st.caption(f"Headline metrics use {label}; forecasting protocols are not pooled.")
     if model and model["mape_hours"] < model["hours"]:
         st.caption("MAPE excludes zero-consumption hours; MAE and RMSE include them.")
 
@@ -143,13 +155,22 @@ if not status["latest_target_date"]:
 
 has_history = bool(status["history_hours"])
 has_issued = bool(status["latest_issued_date"])
+has_simulated = bool(status.get("latest_simulated_date"))
 source = "recorded" if has_history else "issued"
 
-if has_history and has_issued:
-    choice = st.radio("Data series", ["Recorded monitoring", "Issued forecasts"], horizontal=True)
-    source = "recorded" if choice == "Recorded monitoring" else "issued"
+if has_history and (has_issued or has_simulated):
+    choices = ["Complete history", "Recorded monitoring"]
+    if has_issued:
+        choices.append("Issued forecasts")
+    choice = st.radio("Data series", choices, horizontal=True)
+    source = {"Complete history": "all", "Recorded monitoring": "recorded", "Issued forecasts": "issued"}[
+        choice
+    ]
 
-if source == "recorded":
+if source == "all":
+    first = date.fromisoformat(status["first_target_date"])
+    last = date.fromisoformat(status["latest_target_date"])
+elif source == "recorded":
     first = date.fromisoformat(status["history_first_date"])
     last = date.fromisoformat(status["history_latest_date"])
 else:
@@ -191,6 +212,10 @@ try:
                     rows = []
                     for month, subset in frame.groupby(frame.date.dt.strftime("%Y-%m")):
                         result = evaluate_records(subset.to_dict("records"))
+                        if "by_origin" in result:
+                            result = result["by_origin"].get("historical_monitoring") or result[
+                                "by_origin"
+                            ].get("historical_simulation")
                         model = result["paired_model"] or result["model"]
                         epias = result["epias"]
                         if model:
@@ -232,6 +257,12 @@ try:
             st.write(
                 "This view preserves the project's recorded monitoring history. Original prediction issuance "
                 "times were not stored, so these comparisons are reported as historical monitoring results."
+            )
+        elif source == "all":
+            st.write(
+                "This view combines recorded monitoring, genuinely issued forecasts, and clearly labeled "
+                "historical simulations used only to fill missing dates. Simulations use a 48-hour data "
+                "availability cutoff and are evaluated separately from other forecasting protocols."
             )
         else:
             st.write(
