@@ -179,14 +179,54 @@ class Database:
                 record.retrieved_at = utc_naive(retrieved_at)
         return len(values)
 
-    def missing_actual_dates(self, before):
+    def missing_actual_dates(self, before, since=None):
+        """Return days with missing actuals inside an explicit local-date horizon.
+
+        New observations are stored in observations_v2 even when they repair gaps
+        in the read-only daily_monitoring history.
+        """
+        before_local = local_timestamp(before).normalize()
+        since_local = local_timestamp(since).normalize() if since is not None else None
+        before_utc = utc_naive(before_local)
+        since_utc = utc_naive(since_local) if since_local is not None else None
         with self.Session() as session:
-            dates = session.scalars(
+            issued_query = (
                 select(ForecastHour.date)
                 .outerjoin(Observation, ForecastHour.date == Observation.date)
-                .where(Observation.date.is_(None), ForecastHour.date < utc_naive(before))
-            ).all()
-        return sorted({pd.Timestamp(ts, tz="UTC").tz_convert("Europe/Istanbul").date() for ts in dates})
+                .where(Observation.date.is_(None), ForecastHour.date < before_utc)
+            )
+            if since_utc is not None:
+                issued_query = issued_query.where(ForecastHour.date >= since_utc)
+            missing_stamps = set(session.scalars(issued_query).all())
+
+            if self.has_history():
+                # daily_monitoring timestamps are naive Europe/Istanbul wall time.
+                history_query = select(MonitoringHistory.date).where(
+                    MonitoringHistory.actual_consumption.is_(None),
+                    MonitoringHistory.date < before_local.tz_localize(None).to_pydatetime(),
+                )
+                if since_local is not None:
+                    history_query = history_query.where(
+                        MonitoringHistory.date >= since_local.tz_localize(None).to_pydatetime()
+                    )
+                history_stamps = session.scalars(history_query).all()
+                observation_stamps = set(
+                    session.scalars(
+                        select(Observation.date).where(
+                            Observation.date < before_utc,
+                            *([Observation.date >= since_utc] if since_utc is not None else []),
+                        )
+                    ).all()
+                )
+                missing_stamps.update(
+                    utc_naive(local_timestamp(stamp))
+                    for stamp in history_stamps
+                    if utc_naive(local_timestamp(stamp)) not in observation_stamps
+                )
+
+        return sorted(
+            {pd.Timestamp(ts, tz="UTC").tz_convert("Europe/Istanbul").date() for ts in missing_stamps}
+        )
 
     def record_job(self, task, status, detail, at):
         with self.Session.begin() as session:
@@ -204,13 +244,28 @@ class Database:
                 )
                 .order_by(MonitoringHistory.date)
             ).all()
+            observations = session.scalars(
+                select(Observation).where(
+                    Observation.date >= utc_naive(datetime.combine(start, time.min)),
+                    Observation.date < utc_naive(datetime.combine(end + timedelta(days=1), time.min)),
+                )
+            ).all()
+            observed = {row.date: row for row in observations}
             return [
                 {
                     "date": utc_iso(utc_naive(row.date)),
                     "prediction": row.model_prediction,
                     "epias_forecast": row.epias_forecast,
-                    "actual": row.actual_consumption,
-                    "actual_retrieved_at": None,
+                    "actual": (
+                        observed[utc_naive(row.date)].consumption
+                        if utc_naive(row.date) in observed
+                        else row.actual_consumption
+                    ),
+                    "actual_retrieved_at": (
+                        utc_iso(observed[utc_naive(row.date)].retrieved_at)
+                        if utc_naive(row.date) in observed
+                        else None
+                    ),
                     "run_id": None,
                     "issued_at": None,
                     "model_version": None,

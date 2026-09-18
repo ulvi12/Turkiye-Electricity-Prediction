@@ -96,7 +96,7 @@ def test_benchmark_failure_does_not_prevent_forecast(db, result):
     assert saved.benchmark_status == "unavailable"
 
 
-def test_actuals_recovery_includes_old_unresolved_dates(db, result):
+def test_actuals_recovery_respects_horizon(db, result):
     db.save_forecast(result, ISSUE)
     requested = []
 
@@ -106,7 +106,33 @@ def test_actuals_recovery_includes_old_unresolved_dates(db, result):
             return pd.DataFrame({"date": day_hours(start), "consumption": 40000})
 
     daily_run.reconcile_actuals(db, Loader(), 1, lambda: local_timestamp("2026-02-01 10:00"))
-    assert date(2026, 1, 1) in requested and date(2026, 1, 31) in requested
+    assert date(2026, 1, 1) not in requested
+    assert requested == [date(2026, 1, 31)]
+
+
+def test_actuals_recovery_repairs_history_without_rewriting_it(db, populate_history):
+    populate_history(db)
+    missing_stamp = pd.Timestamp("2026-05-30 07:00").to_pydatetime()
+    from src.database import MonitoringHistory
+
+    with db.Session.begin() as session:
+        session.get(MonitoringHistory, missing_stamp).actual_consumption = None
+
+    requested = []
+
+    class Loader:
+        def get_realtime_consumption(self, start, end):
+            requested.append(start)
+            return pd.DataFrame({"date": day_hours(start), "consumption": 42000})
+
+    daily_run.reconcile_actuals(db, Loader(), 7, lambda: local_timestamp("2026-06-01 10:00"))
+
+    repaired = db.series(date(2026, 5, 30), date(2026, 5, 30), "recorded")
+    assert date(2026, 5, 30) in requested
+    assert repaired[7]["actual"] == 42000
+    assert repaired[7]["actual_retrieved_at"] is not None
+    with db.Session() as session:
+        assert session.get(MonitoringHistory, missing_stamp).actual_consumption is None
 
 
 def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):

@@ -42,4 +42,4 @@ jobs:
           mode="${REQUESTED_MODE:-all}"
           if [ "$SCHEDULE" = "15 12,18 * * *" ]; then mode=actuals; fi
           docker run --rm -e EPIAS_USERNAME -e EPIAS_PASSWORD -e DATABASE_URL \
-            grid-forecast python scripts/daily_run.py --mode "$mode"
+            grid-forecast python scripts/daily_run.py --mode "$mode" --lookback-days 365

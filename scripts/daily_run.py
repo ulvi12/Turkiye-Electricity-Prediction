@@ -41,12 +41,13 @@ def issue_forecast(db, loader, clock=now_local, pipeline_factory=InferencePipeli
     return db.save_forecast(result, clock(), benchmark, benchmark_status)
 
 
-def reconcile_actuals(db, loader, lookback_days=14, clock=now_local):
+def reconcile_actuals(db, loader, lookback_days=365, clock=now_local):
     today = local_timestamp(clock()).normalize()
-    dates = set(
-        pd.date_range(today - pd.Timedelta(days=lookback_days), today - pd.Timedelta(days=1), freq="D").date
-    )
-    dates.update(db.missing_actual_dates(today))
+    since = today - pd.Timedelta(days=lookback_days)
+    # Always attempt yesterday, then request only dates where stored hourly
+    # records still have missing actuals. Repeated runs are idempotent.
+    dates = {(today - pd.Timedelta(days=1)).date()}
+    dates.update(db.missing_actual_dates(today, since))
     failures = []
     for target in sorted(dates):
         try:
@@ -65,7 +66,7 @@ def reconcile_actuals(db, loader, lookback_days=14, clock=now_local):
         raise RuntimeError(f"Actuals incomplete for {len(failures)} day(s): {', '.join(failures[:10])}")
 
 
-def run(mode="all", lookback_days=14, db=None, loader=None, clock=now_local):
+def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
     db, loader = db or Database(), loader or DataLoader()
     db.initialize()
     failures = []
@@ -91,7 +92,12 @@ def run(mode="all", lookback_days=14, db=None, loader=None, clock=now_local):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["all", "forecast", "actuals"], default="all")
-    parser.add_argument("--lookback-days", type=int, default=14)
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=365,
+        help="Past-day horizon scanned for missing actual consumption (default: 365)",
+    )
     args = parser.parse_args()
     if not 1 <= args.lookback_days <= 366:
         parser.error("--lookback-days must be between 1 and 366")
