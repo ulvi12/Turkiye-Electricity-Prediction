@@ -6,61 +6,46 @@ An end-to-end machine learning project for forecasting Türkiye's hourly electri
 
 ## The problem
 
-Electricity demand changes with daily routines, weekends, holidays, and seasonal patterns. A useful forecast needs to capture those patterns while using only information available before the target day.
+Power systems must schedule generation before electricity is consumed. Errors in the next day's demand forecast make balancing supply and demand harder and more expensive.
 
-This project combines time-series feature engineering, XGBoost, scheduled data ingestion, persistent monitoring, and an interactive dashboard. It connects model evaluation with the practical work of collecting data, publishing forecasts, and measuring error over time.
-
-## Results
-
-On the held-out 2025 dataset, the consumption-and-calendar model achieved **2.84% MAPE** and reduced MAE by **43.7% against the same-hour-last-week baseline**, across **8,760 hourly observations**.
-
-| Model | MAE (MWh) | RMSE (MWh) | MAPE |
-|---|---:|---:|---:|
-| XGBoost | 1,137.12 | 1,607.69 | 2.84% |
-| Same hour, previous week | 2,018.93 | 3,166.77 | 5.25% |
-| Same hour, 48 hours earlier | 3,180.36 | 4,449.93 | 8.17% |
-
-The evaluation uses 2022–2023 for initial training, 2024 for model selection, and 2025 for the final test. The evaluation model is fit through 2024; the production model is subsequently refit through 2025.
-
-These results come from the held-out 2025 evaluation with a 48-hour consumption availability assumption. [Full evaluation results](reports/evaluation.json)
-
-## Data and modeling
-
-- **Source:** hourly consumption from EPIAS, with its official load estimates used as a comparison series.
-- **Features:** hour, weekday, season, year, public holidays, consumption lags at 48/72/168 hours, and daily/weekly rolling statistics.
-- **Model:** XGBoost regression with early stopping, chronological validation, and fixed random seeds.
-- **Data integrity:** an explicit hourly index prevents missing records from shifting lag meaning. Incomplete inputs are rejected before publication.
-
-Training and inference use the same feature implementation. Historical weather is excluded from the current model because its availability at the forecast cutoff could not be verified.
+The problem is particularly relevant in Türkiye: electricity demand grew by almost 5% per year from 2005 to 2024—the fastest rate among IEA member countries—and continued growth is expected alongside expanding wind and solar generation. Accurate short-term forecasts support more efficient scheduling, market decisions, and grid operation. [IEA: Türkiye 2026](https://www.iea.org/reports/turkiye-2026/executive-summary)
 
 ## System design
 
 ```mermaid
 flowchart LR
-    E[EPIAS] --> W[Scheduled forecast worker]
+    S[GitHub Actions scheduler] --> W[Forecast worker in Docker]
+    E[Market data API] --> W
+    M[XGBoost model] --> W
     W --> D[(Supabase / PostgreSQL)]
-    D --> A[FastAPI]
-    A --> U[Streamlit dashboard]
-    T[Training and evaluation] --> M[Versioned model]
-    M --> W
+    D --> F[FastAPI]
+    F --> U[Streamlit dashboard]
 ```
 
-The worker runs in Docker through GitHub Actions. It publishes the next day's 24-hour forecast before the project's noon Istanbul cutoff, then reconciles observed consumption independently.
+The scheduled worker retrieves market data, generates the next day's 24 hourly predictions, and stores forecasts with their model version and issuance time. Separate recovery runs collect actual consumption and official forecasts, while a rolling 365-day check repairs gaps in the historical series. FastAPI exposes forecasts, metrics, and system status to the Streamlit dashboard.
 
-Each issued forecast preserves its prediction values, input snapshot, issuance time, and model fingerprint. Retries retain the original forecast. A rolling 365-day integrity check keeps model predictions, actual consumption, and official forecasts complete.
+**Stack:** Python · Pandas · XGBoost · FastAPI · SQLAlchemy · PostgreSQL/Supabase · Streamlit · Plotly · Docker · GitHub Actions
 
-FastAPI serves stored results to Streamlit. The dashboard provides a full-history comparison, daily demand curves, monthly error summaries, and hourly data export. It reads the original monitoring records alongside the newer forecast schema, with separate evaluation views for their different recording methods.
+## Results
 
-## Evaluation and reliability
+The XGBoost model achieved **2.84% MAPE** on all **8,760 hours of the held-out 2025 test year**, compared with **3.07%** for the official market forecast.
 
-- Model and EPIAS errors are compared on identical hours, with coverage shown explicitly.
-- MAE and RMSE use MWh; MAPE is a percentage.
-- Historical monitoring remains available even when no newly issued forecast exists.
-- The release gate requires the candidate model to outperform both naive baselines on holdout MAE.
-- Regression tests cover history compatibility, time alignment, missing data, forecast cutoffs, immutable retries, API behavior, and dashboard rendering.
+| Forecast | MAE (MWh) | RMSE (MWh) | MAPE |
+|---|---:|---:|---:|
+| XGBoost | 1,137.12 | 1,607.69 | 2.84% |
+| Official market forecast | 1,236.55 | 1,863.16 | 3.07% |
+| Same hour, previous week | 2,018.93 | 3,166.77 | 5.25% |
+| Same hour, 48 hours earlier | 3,180.36 | 4,449.93 | 8.17% |
 
-Original monitoring records do not contain issuance timestamps. Their comparisons are retained as recorded results, rather than treated as evidence of advance publication. Forecast collection also depends on provider availability and best-effort scheduling.
+Training uses 2022–2023 data, 2024 is reserved for model selection, and 2025 is held out for final evaluation. The release gate requires the selected model to outperform both naive baselines. [Full evaluation results](reports/evaluation.json)
 
-## Stack
+## Data and modeling
 
-**Python · Pandas · XGBoost · FastAPI · SQLAlchemy · PostgreSQL/Supabase · Streamlit · Plotly · Docker · GitHub Actions**
+- **Data:** hourly national consumption and official forecasts from Türkiye's energy market operator.
+- **Features:** calendar variables, public holidays, 48/72/168-hour demand lags, and daily and weekly rolling statistics.
+- **Model:** XGBoost regression with chronological validation and early stopping.
+- **Monitoring:** MAE, RMSE, and MAPE are recomputed as actual consumption arrives.
+
+## Dashboard
+
+The dashboard presents the complete historical comparison in one view, including hourly demand curves, model and official forecast errors, monthly performance, coverage, recent system status, and CSV export.
