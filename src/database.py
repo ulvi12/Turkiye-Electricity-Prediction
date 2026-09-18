@@ -26,6 +26,8 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -175,29 +177,40 @@ class Database:
 
     def save_actuals(self, frame, retrieved_at):
         values = hourly_frame(frame, "consumption")
+        return self._upsert_hourly(Observation, "consumption", values, retrieved_at)
+
+    def _upsert_hourly(self, model, value_column, values, retrieved_at):
+        retrieved = utc_naive(retrieved_at)
+        payload = [
+            {
+                "date": utc_naive(ts),
+                value_column: float(getattr(row, value_column if value_column != "forecast" else "lep")),
+                "retrieved_at": retrieved,
+            }
+            for ts, row in values.iterrows()
+        ]
+        insert_factory = {
+            "postgresql": postgresql_insert,
+            "sqlite": sqlite_insert,
+        }.get(self.engine.dialect.name)
+        if insert_factory is None:
+            raise RuntimeError(f"Unsupported database dialect: {self.engine.dialect.name}")
         with self.Session.begin() as session:
-            for ts, row in values.iterrows():
-                stamp = utc_naive(ts)
-                record = session.get(Observation, stamp)
-                if record is None:
-                    record = Observation(date=stamp)
-                    session.add(record)
-                record.consumption = float(row.consumption)
-                record.retrieved_at = utc_naive(retrieved_at)
-        return len(values)
+            for offset in range(0, len(payload), 500):
+                statement = insert_factory(model).values(payload[offset : offset + 500])
+                statement = statement.on_conflict_do_update(
+                    index_elements=[model.date],
+                    set_={
+                        value_column: getattr(statement.excluded, value_column),
+                        "retrieved_at": statement.excluded.retrieved_at,
+                    },
+                )
+                session.execute(statement)
+        return len(payload)
 
     def save_operator_forecasts(self, frame, retrieved_at):
         values = hourly_frame(frame, "lep")
-        with self.Session.begin() as session:
-            for ts, row in values.iterrows():
-                stamp = utc_naive(ts)
-                record = session.get(OperatorForecast, stamp)
-                if record is None:
-                    record = OperatorForecast(date=stamp)
-                    session.add(record)
-                record.forecast = float(row.lep)
-                record.retrieved_at = utc_naive(retrieved_at)
-        return len(values)
+        return self._upsert_hourly(OperatorForecast, "forecast", values, retrieved_at)
 
     def missing_actual_dates(self, before, since=None):
         """Return days with missing actuals inside an explicit local-date horizon.
