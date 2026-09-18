@@ -1,6 +1,7 @@
 """Bounded EPIAS requests. Failed requests never become empty successes."""
 
 import calendar
+import numpy as np
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -71,7 +72,19 @@ class DataLoader:
             start = stop + pd.Timedelta(days=1)
         if not items:
             return pd.DataFrame(columns=["date", column])
-        df = hourly_frame(pd.DataFrame(items), column, allow_missing=allow_missing)
+        raw = pd.DataFrame(items)
+        if allow_missing:
+            raw["date"] = pd.DatetimeIndex([local_timestamp(value) for value in raw["date"]])
+            raw[column] = pd.to_numeric(raw[column], errors="coerce")
+            raw = raw.loc[raw.date == raw.date.dt.floor("h")]
+            raw = raw.loc[raw[column].isna() | (np.isfinite(raw[column]) & (raw[column] >= 0))]
+            raw["_available"] = raw[column].notna()
+            raw = (
+                raw.sort_values(["date", "_available"])
+                .drop_duplicates("date", keep="last")
+                .drop(columns="_available")
+            )
+        df = hourly_frame(raw, column, allow_missing=allow_missing)
         first, last = local_timestamp(start_date).normalize(), local_timestamp(end_date).normalize()
         return df.loc[(df.index >= first) & (df.index < last + pd.Timedelta(days=1))].reset_index()
 

@@ -46,10 +46,13 @@ def test_network_failure_does_not_return_empty_success():
 def test_partial_official_forecast_response_preserves_available_hours():
     items = [
         {"date": "2026-01-01T00:00:00+03:00", "lep": 40000},
+        {"date": "2026-01-01T00:00:00+03:00", "lep": None},
         {"date": "2026-01-01T01:00:00+03:00", "lep": None},
+        {"date": "2026-01-01T01:30:00+03:00", "lep": 99999},
     ]
     loader, _ = loader_with([response(body={"items": items})])
     result = loader.get_load_estimation_plan(
         local_timestamp("2026-01-01"), local_timestamp("2026-01-01")
     )
     assert result.lep.notna().sum() == 1
+    assert result.iloc[0].lep == 40000
