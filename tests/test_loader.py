@@ -41,3 +41,15 @@ def test_network_failure_does_not_return_empty_success():
     loader, _ = loader_with([requests.Timeout()])
     with pytest.raises(requests.Timeout):
         loader.get_realtime_consumption(local_timestamp("2026-01-01"), local_timestamp("2026-01-01"))
+
+
+def test_partial_official_forecast_response_preserves_available_hours():
+    items = [
+        {"date": "2026-01-01T00:00:00+03:00", "lep": 40000},
+        {"date": "2026-01-01T01:00:00+03:00", "lep": None},
+    ]
+    loader, _ = loader_with([response(body={"items": items})])
+    result = loader.get_load_estimation_plan(
+        local_timestamp("2026-01-01"), local_timestamp("2026-01-01")
+    )
+    assert result.lep.notna().sum() == 1

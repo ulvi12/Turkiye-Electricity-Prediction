@@ -37,7 +37,7 @@ class DataLoader:
             raise RuntimeError(f"EPIAS authentication failed (HTTP {response.status_code})")
         self.tgt = response.headers["Location"].rstrip("/").split("/")[-1]
 
-    def _fetch_monthly(self, endpoint, start_date, end_date, column):
+    def _fetch_monthly(self, endpoint, start_date, end_date, column, *, allow_missing=False):
         start, end = local_timestamp(start_date).normalize(), local_timestamp(end_date).normalize()
         if end < start:
             raise ValueError("End date precedes start date")
@@ -71,7 +71,7 @@ class DataLoader:
             start = stop + pd.Timedelta(days=1)
         if not items:
             return pd.DataFrame(columns=["date", column])
-        df = hourly_frame(pd.DataFrame(items), column)
+        df = hourly_frame(pd.DataFrame(items), column, allow_missing=allow_missing)
         first, last = local_timestamp(start_date).normalize(), local_timestamp(end_date).normalize()
         return df.loc[(df.index >= first) & (df.index < last + pd.Timedelta(days=1))].reset_index()
 
@@ -79,4 +79,6 @@ class DataLoader:
         return self._fetch_monthly("realtime-consumption", start_date, end_date, "consumption")
 
     def get_load_estimation_plan(self, start_date, end_date):
-        return self._fetch_monthly("load-estimation-plan", start_date, end_date, "lep")
+        return self._fetch_monthly(
+            "load-estimation-plan", start_date, end_date, "lep", allow_missing=True
+        )

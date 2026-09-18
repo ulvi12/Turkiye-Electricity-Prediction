@@ -209,7 +209,9 @@ class Database:
         return len(payload)
 
     def save_operator_forecasts(self, frame, retrieved_at):
-        values = hourly_frame(frame, "lep")
+        values = hourly_frame(frame, "lep", allow_missing=True).dropna(subset=["lep"])
+        if values.empty:
+            return 0
         return self._upsert_hourly(OperatorForecast, "forecast", values, retrieved_at)
 
     def missing_actual_dates(self, before, since=None):

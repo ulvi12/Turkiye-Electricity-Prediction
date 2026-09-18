@@ -128,11 +128,11 @@ def reconcile_operator_forecasts(db, loader, lookback_days=365, clock=now_local)
     db.save_operator_forecasts(forecasts, clock())
     remaining = db.missing_operator_forecast_dates(today, since)
     if remaining:
-        raise RuntimeError(
-            f"Official forecasts incomplete for {len(remaining)} day(s): "
-            f"{', '.join(str(day) for day in remaining[:10])}"
+        logger.warning(
+            "Official forecasts remain incomplete for %d day(s); missing provider values will be retried",
+            len(remaining),
         )
-    return len(targets)
+    return len(targets) - len(remaining)
 
 
 def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
