@@ -12,7 +12,7 @@ def test_api_validation_and_empty_results(db):
         assert client.post("/predict", json={}).status_code == 404
         assert client.get("/forecasts/2026-01-01").status_code == 404
         assert client.get("/forecasts?start=2026-02-01&end=2026-01-01").status_code == 422
-        assert client.get("/metrics?start=2020-01-01&end=2026-01-01").status_code == 422
+        assert client.get("/metrics?start=2020-01-01&end=2026-01-01").status_code == 200
         assert client.get("/status").json()["latest_target_date"] is None
 
 

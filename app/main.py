@@ -59,8 +59,6 @@ def create_app(database=None):
     def date_range(start, end):
         if end < start:
             raise HTTPException(422, "end must be on or after start")
-        if (end - start).days > 365:
-            raise HTTPException(422, "Choose at most 366 days per request")
 
     @application.get("/forecasts")
     def forecasts(

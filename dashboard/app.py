@@ -1,6 +1,6 @@
 """Electricity demand monitoring and model evaluation."""
 
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 import os
 import sys
@@ -144,24 +144,24 @@ if not status["latest_target_date"]:
 source = "all"
 first = date.fromisoformat(status["first_target_date"])
 last = date.fromisoformat(status["latest_target_date"])
+whole_history = (first, last)
 
 info_column, refresh_column = st.columns([6, 1])
 info_column.caption(f"Data available: {first:%d %b %Y} — {last:%d %b %Y} · Istanbul time (UTC+03)")
 if refresh_column.button("Refresh", use_container_width=True):
+    st.session_state["history_range"] = whole_history
     st.cache_data.clear()
     st.rerun()
 try:
     dates = st.date_input(
         "Date range",
-        (max(first, last - timedelta(days=365)), last),
+        whole_history,
         min_value=first,
         max_value=last,
         key="history_range",
     )
     if len(dates) != 2:
         st.info("Choose an end date to view the selected period.")
-    elif (dates[1] - dates[0]).days > 365:
-        st.info("Select up to 366 days at a time.")
     else:
         start, end = dates
         records = fetch("/forecasts", start=str(start), end=str(end), source=source)["records"]

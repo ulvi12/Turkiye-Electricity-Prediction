@@ -31,6 +31,8 @@ def test_dashboard_populated_and_interactive(db, monkeypatch, populate_history):
     assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
     page.date_input[0].set_value((date(2026, 3, 1), date(2026, 3, 26))).run()
     assert not page.exception
+    page.button[0].click().run()
+    assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
     st.cache_data.clear()
 
 
