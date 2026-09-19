@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 import sys
 import pandas as pd
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.config import FORECAST_CUTOFF_HOUR
@@ -14,6 +15,17 @@ from src.inference import InferencePipeline
 from src.time_utils import day_hours, local_timestamp, now_local
 
 logger = logging.getLogger(__name__)
+
+
+class DeferredProviderData(RuntimeError):
+    """An optional provider series is temporarily unavailable and will be retried."""
+
+
+def retryable_provider_error(error):
+    if isinstance(error, requests.RequestException):
+        return True
+    message = str(error)
+    return any(f"HTTP {status}" in message for status in (429, 500, 502, 503, 504))
 
 
 def issue_forecast(db, loader, clock=now_local, pipeline_factory=InferencePipeline):
@@ -122,9 +134,16 @@ def reconcile_operator_forecasts(db, loader, lookback_days=365, clock=now_local)
     targets = db.missing_operator_forecast_dates(today, since)
     if not targets:
         return 0
-    forecasts = loader.get_load_estimation_plan(targets[0], targets[-1])
+    try:
+        forecasts = loader.get_load_estimation_plan(targets[0], targets[-1])
+    except Exception as exc:
+        if not retryable_provider_error(exc):
+            raise
+        raise DeferredProviderData(
+            f"Official forecasts unavailable ({type(exc).__name__}); retry scheduled"
+        ) from exc
     if forecasts.empty:
-        raise RuntimeError("Official historical forecasts are unavailable")
+        raise DeferredProviderData("Official forecasts unavailable (empty provider response); retry scheduled")
     db.save_operator_forecasts(forecasts, clock())
     remaining = db.missing_operator_forecast_dates(today, since)
     if remaining:
@@ -157,6 +176,10 @@ def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
         try:
             task()
             db.record_job(name, "success", "Completed", clock())
+        except DeferredProviderData as exc:
+            detail = str(exc)
+            logger.warning("%s", detail)
+            db.record_job(name, "deferred", detail, clock())
         except Exception as exc:
             # Store a safe classification; secrets/provider response bodies stay out of DB/logs.
             detail = f"{type(exc).__name__}: {name} failed; inspect input coverage, credentials, and cutoff"

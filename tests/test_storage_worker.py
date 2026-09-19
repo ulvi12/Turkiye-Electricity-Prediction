@@ -2,6 +2,7 @@ from datetime import date
 import json
 import pandas as pd
 import pytest
+import requests
 from scripts import daily_run
 from src.inference import ForecastResult
 from src.time_utils import day_hours, local_timestamp
@@ -210,6 +211,48 @@ def test_official_forecast_gaps_are_reconciled(db, populate_history):
     )
     rows = db.series(date(2026, 5, 31), date(2026, 5, 31))
     assert rows[11]["epias_forecast"] == 41000
+
+
+def test_operator_forecast_provider_outage_is_deferred(db, result, monkeypatch):
+    db.save_forecast(result, ISSUE)
+    monkeypatch.setattr(daily_run, "backfill_forecast_gaps", lambda *args: 0)
+    monkeypatch.setattr(daily_run, "reconcile_actuals", lambda *args: None)
+
+    class Loader:
+        def get_load_estimation_plan(self, start, end):
+            raise requests.Timeout("provider unavailable")
+
+    daily_run.run(
+        mode="actuals",
+        db=db,
+        loader=Loader(),
+        clock=lambda: local_timestamp("2026-01-02 10:00"),
+    )
+
+    events = db.status()["jobs"]
+    assert events[0]["task"] == "operator_forecasts"
+    assert events[0]["status"] == "deferred"
+    assert "provider unavailable" not in events[0]["detail"]
+
+
+def test_operator_forecast_auth_failure_remains_fatal(db, result, monkeypatch):
+    db.save_forecast(result, ISSUE)
+    monkeypatch.setattr(daily_run, "backfill_forecast_gaps", lambda *args: 0)
+    monkeypatch.setattr(daily_run, "reconcile_actuals", lambda *args: None)
+
+    class Loader:
+        def get_load_estimation_plan(self, start, end):
+            raise RuntimeError("EPIAS authentication failed (HTTP 401)")
+
+    with pytest.raises(RuntimeError, match="operator_forecasts"):
+        daily_run.run(
+            mode="actuals",
+            db=db,
+            loader=Loader(),
+            clock=lambda: local_timestamp("2026-01-02 10:00"),
+        )
+
+    assert db.status()["jobs"][0]["status"] == "failed"
 
 
 def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):
