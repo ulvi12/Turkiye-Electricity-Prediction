@@ -152,10 +152,11 @@ if refresh_column.button("Refresh", use_container_width=True):
     st.session_state["history_range"] = whole_history
     st.cache_data.clear()
     st.rerun()
+if "history_range" not in st.session_state:
+    st.session_state["history_range"] = whole_history
 try:
     dates = st.date_input(
         "Date range",
-        whole_history,
         min_value=first,
         max_value=last,
         key="history_range",
