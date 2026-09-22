@@ -31,7 +31,7 @@ h1, h2, h3 { color: #172c46; }
 )
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def fetch(route, **params):
     def setting(name):
         if os.getenv(name):
@@ -149,8 +149,8 @@ whole_history = (first, last)
 info_column, refresh_column = st.columns([6, 1])
 info_column.caption(f"Data available: {first:%d %b %Y} — {last:%d %b %Y} · Istanbul time (UTC+03)")
 if refresh_column.button("Refresh", use_container_width=True):
-    st.session_state["history_range"] = whole_history
-    st.cache_data.clear()
+    st.session_state.pop("history_range", None)
+    fetch.clear()
     st.rerun()
 if "history_range" not in st.session_state:
     st.session_state["history_range"] = whole_history
@@ -165,13 +165,17 @@ try:
         st.info("Choose an end date to view the selected period.")
     else:
         start, end = dates
-        records = fetch("/forecasts", start=str(start), end=str(end), source=source)["records"]
+        # Share one cached history fetch across date selections and visitor sessions.
+        records = fetch("/forecasts", start=str(first), end=str(last), source=source)["records"]
+        if records:
+            frame = frame_from(records)
+            frame = frame.loc[(frame.date.dt.date >= start) & (frame.date.dt.date <= end)]
+            records = frame.to_dict("records")
         if not records:
             st.info("No records in the selected date range.")
         else:
             metrics = evaluate_records(records, ((end - start).days + 1) * 24)
             metric_cards(metrics)
-            frame = frame_from(records)
             st.subheader("Consumption over time")
             plot_consumption(frame, daily=True)
             with st.expander("Monthly performance"):

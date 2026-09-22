@@ -10,8 +10,10 @@ from src.time_utils import day_hours, local_timestamp
 
 def test_dashboard_populated_and_interactive(db, monkeypatch, populate_history):
     populate_history(db)
+    calls = []
 
     def get(self, route, **params):
+        calls.append((route, params))
         if route == "/status":
             return {**db.status(), "tomorrow_ready": False, "expected_target_date": "2026-01-01"}
         start, end = date.fromisoformat(params["start"]), date.fromisoformat(params["end"])
@@ -31,8 +33,12 @@ def test_dashboard_populated_and_interactive(db, monkeypatch, populate_history):
     assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
     page.date_input[0].set_value((date(2026, 3, 1), date(2026, 3, 26))).run()
     assert not page.exception
+    assert not page.error
+    assert len([route for route, _ in calls if route == "/forecasts"]) == 1
+    assert "624 evaluated hours" in " ".join(caption.value for caption in page.caption)
     page.button[0].click().run()
     assert page.date_input[0].value == (date(2026, 2, 15), date(2026, 5, 31))
+    assert len([route for route, _ in calls if route == "/forecasts"]) == 2
     st.cache_data.clear()
 
 

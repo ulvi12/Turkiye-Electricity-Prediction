@@ -3,12 +3,37 @@ from datetime import date, datetime
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.main import create_app
 from src.database import ForecastRun, MonitoringHistory
 from src.metrics import evaluate_records
 from src.time_utils import day_hours, local_timestamp
+
+
+def test_serving_queries_never_download_input_snapshots(db, result):
+    result.input_snapshot["large_audit_payload"] = "x" * 32000
+    run = db.save_forecast(result, local_timestamp("2025-12-31 10:00"))
+    statements = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db.engine, "before_cursor_execute", capture)
+    try:
+        rows = db.series(date(2026, 1, 1), date(2026, 1, 1))
+        status = db.status()
+    finally:
+        event.remove(db.engine, "before_cursor_execute", capture)
+
+    assert len(rows) == 24
+    assert rows[0]["prediction"] == 35000
+    assert rows[0]["run_id"] == run.id
+    assert status["latest_issued_date"] == "2026-01-01"
+    assert statements
+    assert all("input_snapshot" not in statement.lower() for statement in statements)
+    # The audit trail is preserved and still accessible through an explicit run lookup.
+    assert db.get_run("2026-01-01").input_snapshot == run.input_snapshot
 
 
 def test_old_database_is_visible_without_new_forecasts(db, populate_history):

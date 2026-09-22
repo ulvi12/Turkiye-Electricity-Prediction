@@ -28,7 +28,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, load_only, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from src.config import DATABASE_URL, FORECAST_CUTOFF_HOUR
@@ -410,6 +410,10 @@ class Database:
         with self.Session() as session:
             issued_query = (
                 select(ForecastHour, ForecastRun, Observation, OperatorForecast)
+                .options(load_only(
+                    ForecastRun.id, ForecastRun.issued_at, ForecastRun.model_version,
+                    ForecastRun.origin, ForecastRun.benchmark_status, raiseload=True,
+                ))
                 .join(ForecastRun, ForecastHour.run_id == ForecastRun.id)
                 .outerjoin(Observation, ForecastHour.date == Observation.date)
                 .outerjoin(OperatorForecast, ForecastHour.date == OperatorForecast.date)
@@ -465,10 +469,16 @@ class Database:
                 )
         with self.Session() as session:
             latest_any = session.scalar(
-                select(ForecastRun).order_by(ForecastRun.target_date.desc()).limit(1)
+                select(ForecastRun)
+                .options(load_only(ForecastRun.target_date, raiseload=True))
+                .order_by(ForecastRun.target_date.desc()).limit(1)
             )
             latest = session.scalar(
                 select(ForecastRun)
+                .options(load_only(
+                    ForecastRun.target_date, ForecastRun.issued_at,
+                    ForecastRun.model_version, ForecastRun.origin, raiseload=True,
+                ))
                 .where(ForecastRun.origin == "live")
                 .order_by(ForecastRun.target_date.desc())
                 .limit(1)
