@@ -2,10 +2,11 @@ name: Day-ahead forecast and actuals
 
 on:
   schedule:
-    # 09:15, 10:15, 11:15 Istanbul: retry before the 12:00 project cutoff.
-    - cron: '15 6-8 * * *'
-    # Separate actuals recovery, including retries after provider delays.
-    - cron: '15 12,18 * * *'
+    # 03:37, 04:37, 05:37 Istanbul: leave room for delayed GitHub runners
+    # while preserving the 12:00 issuance cutoff.
+    - cron: '37 0,1,2 * * *'
+    # 15:47 and 21:47 Istanbul: actuals and historical gap recovery only.
+    - cron: '47 12,18 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -26,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build reproducible worker
         run: docker build -t grid-forecast .
       - name: Run worker
@@ -39,7 +40,13 @@ jobs:
         shell: bash
         run: |
           test -n "$DATABASE_URL" || { echo "Missing persistent database secret"; exit 1; }
-          mode="${REQUESTED_MODE:-all}"
-          if [ "$SCHEDULE" = "15 12,18 * * *" ]; then mode=actuals; fi
+          mode="${REQUESTED_MODE:-forecast}"
+          if [ -n "$SCHEDULE" ]; then
+            case "$SCHEDULE" in
+              "37 0,1,2 * * *") mode=forecast ;;
+              "47 12,18 * * *") mode=actuals ;;
+              *) echo "Unsupported schedule: $SCHEDULE"; exit 1 ;;
+            esac
+          fi
           docker run --rm -e EPIAS_USERNAME -e EPIAS_PASSWORD -e DATABASE_URL \
             grid-forecast python scripts/daily_run.py --mode "$mode" --lookback-days 365

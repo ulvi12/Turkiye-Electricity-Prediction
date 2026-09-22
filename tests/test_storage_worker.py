@@ -235,6 +235,38 @@ def test_operator_forecast_provider_outage_is_deferred(db, result, monkeypatch):
     assert "provider unavailable" not in events[0]["detail"]
 
 
+def test_actuals_provider_outage_and_incomplete_data_are_deferred(db, result, monkeypatch):
+    db.save_forecast(result, ISSUE)
+    monkeypatch.setattr(daily_run, "backfill_forecast_gaps", lambda *args: 0)
+    monkeypatch.setattr(daily_run, "reconcile_operator_forecasts", lambda *args: 0)
+
+    class UnavailableLoader:
+        def get_realtime_consumption(self, start, end):
+            raise requests.Timeout("provider unavailable")
+
+    daily_run.run(
+        mode="actuals",
+        db=db,
+        loader=UnavailableLoader(),
+        clock=lambda: local_timestamp("2026-01-02 10:00"),
+    )
+    assert db.status()["jobs"][1]["task"] == "actuals"
+    assert db.status()["jobs"][1]["status"] == "deferred"
+
+    class IncompleteLoader:
+        def get_realtime_consumption(self, start, end):
+            return pd.DataFrame(columns=["date", "consumption"])
+
+    daily_run.run(
+        mode="actuals",
+        db=db,
+        loader=IncompleteLoader(),
+        clock=lambda: local_timestamp("2026-01-02 11:00"),
+    )
+    assert db.status()["jobs"][1]["task"] == "actuals"
+    assert db.status()["jobs"][1]["status"] == "deferred"
+
+
 def test_operator_forecast_auth_failure_remains_fatal(db, result, monkeypatch):
     db.save_forecast(result, ISSUE)
     monkeypatch.setattr(daily_run, "backfill_forecast_gaps", lambda *args: 0)
@@ -253,6 +285,20 @@ def test_operator_forecast_auth_failure_remains_fatal(db, result, monkeypatch):
         )
 
     assert db.status()["jobs"][0]["status"] == "failed"
+
+
+def test_missed_cutoff_records_the_scheduler_cause(db, monkeypatch):
+    def miss_cutoff(*args):
+        raise ValueError("Missed 12:00 Istanbul issuance cutoff; past forecasts are never backdated")
+
+    monkeypatch.setattr(daily_run, "issue_forecast", miss_cutoff)
+
+    with pytest.raises(RuntimeError, match="forecast"):
+        daily_run.run(mode="forecast", db=db, loader=object(), clock=lambda: ISSUE)
+
+    event = db.status()["jobs"][0]
+    assert event["status"] == "failed"
+    assert "scheduler started after" in event["detail"]
 
 
 def test_worker_attempts_actuals_after_forecast_failure(db, monkeypatch):

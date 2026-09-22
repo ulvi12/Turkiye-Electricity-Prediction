@@ -70,11 +70,16 @@ def reconcile_actuals(db, loader, lookback_days=365, clock=now_local):
         failures = [
             str(target) for target in targets if len(received.intersection(day_hours(target))) != 24
         ]
-    except Exception:
-        logger.warning("Historical actuals unavailable; will retry on the next run")
-        failures = [str(target) for target in targets]
+    except Exception as exc:
+        if not retryable_provider_error(exc):
+            raise
+        raise DeferredProviderData(
+            f"Actual consumption unavailable ({type(exc).__name__}); retry scheduled"
+        ) from exc
     if failures:
-        raise RuntimeError(f"Actuals incomplete for {len(failures)} day(s): {', '.join(failures[:10])}")
+        raise DeferredProviderData(
+            f"Actual consumption incomplete for {len(failures)} day(s); retry scheduled"
+        )
 
 
 def backfill_forecast_gaps(db, loader, lookback_days=365, clock=now_local, pipeline_factory=InferencePipeline):
@@ -181,8 +186,18 @@ def run(mode="all", lookback_days=365, db=None, loader=None, clock=now_local):
             logger.warning("%s", detail)
             db.record_job(name, "deferred", detail, clock())
         except Exception as exc:
+            if retryable_provider_error(exc):
+                detail = f"{name} unavailable ({type(exc).__name__}); retry scheduled"
+                logger.warning("%s", detail)
+                db.record_job(name, "deferred", detail, clock())
+                continue
             # Store a safe classification; secrets/provider response bodies stay out of DB/logs.
-            detail = f"{type(exc).__name__}: {name} failed; inspect input coverage, credentials, and cutoff"
+            if name == "forecast" and str(exc).startswith("Missed 12:00 Istanbul issuance cutoff"):
+                detail = "Forecast failed because the scheduler started after the 12:00 Istanbul cutoff"
+            elif "authentication failed" in str(exc).lower():
+                detail = f"{name} failed because provider authentication was rejected"
+            else:
+                detail = f"{type(exc).__name__}: {name} failed; inspect input coverage and storage"
             logger.error(detail)
             db.record_job(name, "failed", detail, clock())
             failures.append(name)
