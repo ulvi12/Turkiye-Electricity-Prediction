@@ -2,9 +2,9 @@ import requests
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from dashboard.client import ForecastClient
 from dashboard.service import LocalAPI, local_api
 from dashboard.service import connection_error_code
+from scripts.publish_dashboard import publish
 from src.database import Database
 
 
@@ -20,27 +20,23 @@ def test_private_api_serves_real_http_and_shuts_down():
     assert not service.thread.is_alive()
 
 
-def test_integrated_dashboard_needs_only_existing_database_setting(tmp_path, monkeypatch, populate_history):
-    url = f"sqlite:///{(tmp_path / 'existing.db').as_posix()}"
-    db = Database(url)
+def test_integrated_dashboard_uses_published_snapshot_without_database(tmp_path, monkeypatch, populate_history):
+    db = Database("sqlite:///:memory:")
+    db.initialize()
     populate_history(db)
+    snapshot = tmp_path / "history.json.gz"
+    publish(db, snapshot)
     db.engine.dispose()
-    monkeypatch.delenv("API_BASE_URL", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("SUPABASE_DB_URL", url)
+    monkeypatch.setenv("DASHBOARD_SNAPSHOT_PATH", str(snapshot))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://invalid-host/invalid-database")
+    monkeypatch.setenv("API_BASE_URL", "http://127.0.0.1:1")
     st.cache_data.clear()
-    try:
-        page = AppTest.from_file("dashboard/app.py").run(timeout=30)
-        assert not page.exception
-        assert not page.error
-        assert len(page.metric) == 3
-        assert not page.tabs and not page.radio
-        first_service = local_api(url)
-        assert ForecastClient(database_url=url).get("/health")["status"] == "ok"
-        assert local_api(url) is first_service
-    finally:
-        local_api(url).close()
-        st.cache_data.clear()
+    page = AppTest.from_file("dashboard/app.py").run(timeout=30)
+    assert not page.exception
+    assert not page.error
+    assert len(page.metric) == 3
+    assert not page.tabs and not page.radio
+    st.cache_data.clear()
 
 
 def test_concurrent_sessions_share_one_private_api():

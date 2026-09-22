@@ -41,7 +41,7 @@ def fetch(route, **params):
         except FileNotFoundError:
             return None
 
-    client = ForecastClient(setting("API_BASE_URL"), setting("DATABASE_URL") or setting("SUPABASE_DB_URL"))
+    client = ForecastClient(snapshot_only=True)
     return client.get(route, **params)
 
 
@@ -123,6 +123,7 @@ try:
     status = fetch("/status")
 except (requests.RequestException, ValueError) as error:
     explanations = {
+        "snapshot": "Published data is temporarily unavailable. Please try again shortly.",
         "authentication": "Supabase rejected the database credentials. Check the username and password in SUPABASE_DB_URL.",
         "dns": "The Supabase database hostname could not be resolved from this computer.",
         "network_route": "This computer cannot reach the Supabase database address. Use the Supabase session-pooler connection string for local IPv4 access.",

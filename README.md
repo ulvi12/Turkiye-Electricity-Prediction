@@ -19,10 +19,11 @@ flowchart LR
     M[XGBoost model] --> W
     W --> D[(Supabase / PostgreSQL)]
     D --> F[FastAPI]
-    F --> U[Streamlit dashboard]
+    D --> P[Scheduled public snapshot]
+    P --> U[Streamlit dashboard]
 ```
 
-The scheduled worker retrieves market data, generates the next day's 24 hourly predictions, and stores forecasts with their model version and issuance time. Separate recovery runs collect actual consumption and official forecasts, while a rolling 365-day check repairs gaps in the historical series. FastAPI exposes forecasts, metrics, and system status to the Streamlit dashboard.
+The scheduled worker retrieves market data, generates the next day's 24 hourly predictions, and stores forecasts with their model version and issuance time. Separate recovery runs collect actual consumption and official forecasts, while a rolling 365-day check repairs gaps in the historical series. FastAPI serves the database for programmatic access. A scheduled export publishes the same historical series for the Streamlit dashboard, so visitors do not query the database.
 
 **Stack:** Python · Pandas · XGBoost · FastAPI · SQLAlchemy · PostgreSQL/Supabase · Streamlit · Plotly · Docker · GitHub Actions
 

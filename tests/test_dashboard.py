@@ -4,8 +4,27 @@ import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 from dashboard.client import ForecastClient
+from scripts.publish_dashboard import publish
 from src.metrics import evaluate_records
 from src.time_utils import day_hours, local_timestamp
+
+
+def test_published_dashboard_preserves_history_without_database_access(db, populate_history, tmp_path):
+    populate_history(db)
+    path = tmp_path / "history.json.gz"
+    count, size = publish(db, path)
+    assert count == 106 * 24
+    assert size < 100_000
+
+    client = ForecastClient(database_url="not-a-database", snapshot_only=True, snapshot_path=path)
+    status = client.get("/status")
+    assert status["first_target_date"] == "2026-02-15"
+    assert status["latest_target_date"] == "2026-05-31"
+    full = client.get("/forecasts", start="2026-02-15", end="2026-05-31", source="all")
+    selected = client.get("/forecasts", start="2026-03-01", end="2026-03-26", source="all")
+    assert len(full["records"]) == count
+    assert len(selected["records"]) == 26 * 24
+    assert selected["records"][0]["actual"] == 35000
 
 
 def test_dashboard_populated_and_interactive(db, monkeypatch, populate_history):

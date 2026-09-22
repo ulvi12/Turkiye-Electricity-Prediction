@@ -1,0 +1,45 @@
+name: Publish dashboard data
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish_dashboard.yml
+      - scripts/publish_dashboard.py
+      - dashboard/client.py
+      - dashboard/app.py
+  schedule:
+    # 13:17 and 23:17 Istanbul, after forecast and actuals collection.
+    - cron: '17 10,20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dashboard-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pandas==2.2.3 sqlalchemy==2.0.41 psycopg2-binary==2.9.10 python-dotenv==1.1.0
+      - name: Export public dashboard records
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m scripts.publish_dashboard
+      - name: Publish snapshot to the dashboard checkout
+        run: |
+          git add dashboard/data/history.json.gz
+          if git diff --cached --quiet; then exit 0; fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Refresh dashboard data'
+          git pull --rebase origin main
+          git push origin HEAD:main
